@@ -1,11 +1,9 @@
 import sys, os
-from PyQt5.QtWidgets import QApplication, QWidget, QVBoxLayout, QLabel, QFileDialog, QMainWindow, QMessageBox, QProgressDialog
+from PyQt5.QtWidgets import QApplication, QWidget, QVBoxLayout, QLabel, QFileDialog, QMainWindow
 from PyQt5.QtCore import Qt, QSettings, QUrl
 from PyQt5.QtGui import QPixmap, QDesktopServices
 from timestamp import Worker
-from magicrenamer import MagicRenamerThread
 from autodelete import delete_files
-from magicrenamergui import MagicRenamerDialog
 from importtoday import ImportThread
 from check_for_updates import check_for_updates
 from menubar import setup_menu_bar
@@ -50,17 +48,40 @@ class MainWindow(QMainWindow):
         self.version_label.setText(text)
         self.version_label.setStyleSheet(style)
 
-    def launch_magic_renamer_gui(self):
-        self.magic_renamer_gui = MagicRenamerDialog(self.output_folder_path)
-        self.magic_renamer_gui.show()
+    def launch_video_renamer(self):
+        from video_renamer_gui import MainWindow as VideoRenamerWindow
+        initial_folder = self.output_folder_path or None
+        self.video_renamer_window = VideoRenamerWindow(initial_folder=initial_folder)
+        self.video_renamer_window.show()
+        self.position_video_renamer_window()
 
-    def start_magic_renamer(self):
-        directory = self.output_folder_path
-        if directory:
-            self.magic_renamer_thread = MagicRenamerThread(directory)
-            self.magic_renamer_thread.start()
+    def position_video_renamer_window(self):
+        if not hasattr(self, "video_renamer_window") or not self.video_renamer_window:
+            return
+        screen = QApplication.primaryScreen()
+        if not screen:
+            return
+        screen_geom = screen.availableGeometry()
+        main_geom = self.frameGeometry()
+        renamer_geom = self.video_renamer_window.frameGeometry()
+        margin = 20
+
+        right_x = main_geom.right() + margin
+        left_x = main_geom.left() - renamer_geom.width() - margin
+
+        if right_x + renamer_geom.width() <= screen_geom.right():
+            x = right_x
+        elif left_x >= screen_geom.left():
+            x = left_x
         else:
-            QMessageBox.warning(self, "No Output Folder", "Please choose an output folder before starting the rename tool.")
+            x = min(max(screen_geom.left(), right_x), screen_geom.right() - renamer_geom.width())
+
+        y = min(
+            max(screen_geom.top(), main_geom.top()),
+            screen_geom.bottom() - renamer_geom.height(),
+        )
+
+        self.video_renamer_window.move(x, y)
 
     def open_update_link(self, link):
         QDesktopServices.openUrl(QUrl(link))
@@ -112,23 +133,24 @@ class MainWindow(QMainWindow):
         self.settings.setValue('add_hour', self.add_hour_action.isChecked())
         self.settings.setValue('subtract_hour', self.subtract_hour_action.isChecked())
         self.settings.setValue('delete_input_files', self.delete_input_files_action.isChecked())
-        self.settings.setValue('run_magic_renamer_when_finished', self.run_magic_renamer_when_finished_action.isChecked())
+        if hasattr(self, "date_format_group"):
+            selected = self.date_format_group.checkedAction()
+            if selected:
+                self.settings.setValue('date_format', selected.data())
 
     def on_worker_finished(self):
         self.timer.stop()
-        self.progress_dialog.hide()
+        self.status_label.setText("Timestamping complete.")
+        self.progress_bar.setValue(100)
         self.process_button.setEnabled(True)
         if self.settings.value('delete_input_files', False, type=bool):
             delete_files(self.input_files)
-        if self.settings.value('run_magic_renamer_when_finished', False, type=bool):
-            self.start_magic_renamer()
 
     def open_folder(self):
         if self.output_folder_path:
             QDesktopServices.openUrl(QUrl.fromLocalFile(self.output_folder_path))
 
     def main(self):
-        self.progress_dialog.show()
         if self.input_files:
             self.timer.start(500)
             hwaccel_method = self.hwaccel_method if self.settings.value('use_hwaccel', True, type=bool) else 'libx264'
@@ -136,8 +158,16 @@ class MainWindow(QMainWindow):
             manually_adjusted_for_dst = self.manually_adjusted_for_dst_action.isChecked()
             add_hour = self.settings.value('add_hour', False, type=bool)
             subtract_hour = self.settings.value('subtract_hour', False, type=bool)
-            self.worker = Worker(self.input_files, self.output_folder_path, hwaccel_method, remove_audio, manually_adjusted_for_dst, add_hour, subtract_hour)
-            self.worker.progressChanged.connect(self.progress_dialog.progress.setValue)
+            date_format = self.settings.value('date_format', "%m-%d-%Y")
+            self.worker = Worker(self.input_files, self.output_folder_path, hwaccel_method, remove_audio, manually_adjusted_for_dst, add_hour, subtract_hour, date_format)
+            total_files = len(self.input_files)
+            if total_files > 0:
+                self.status_label.setText(f"Timestamping file 1/{total_files}")
+            else:
+                self.status_label.setText("Timestamping file 0/0")
+            self.progress_bar.setValue(0)
+            self.worker.progressChanged.connect(self.progress_bar.setValue)
+            self.worker.progressDetail.connect(self.update_timestamp_status)
             self.worker.finished.connect(self.on_worker_finished)
             self.worker.start()
             self.process_button.setEnabled(False)
@@ -147,19 +177,22 @@ class MainWindow(QMainWindow):
         self.import_thread.progress.connect(self.update_progress)
         self.import_thread.finished.connect(self.finish_import)
         self.import_thread.start()
-        self.progress_dialog.progress_dialog = QProgressDialog("Importing...", "Cancel", 0, 100, self)
-        self.progress_dialog.progress_dialog.setWindowTitle("Importer") 
-        self.progress_dialog.progress_dialog.setWindowFlags(self.progress_dialog.progress_dialog.windowFlags() & ~Qt.WindowContextHelpButtonHint)
-        self.progress_dialog.progress_dialog.canceled.connect(self.import_thread.terminate)
-        self.progress_dialog.progress_dialog.show()
+        self.status_label.setText("Importing files...")
+        self.progress_bar.setValue(0)
         self.import_thread.finished.connect(self.set_output_folder)
         self.import_thread.finished.connect(self.add_new_files)
 
     def update_progress(self, value):
-        self.progress_dialog.progress_dialog.setValue(value)
+        self.status_label.setText(f"Importing files... {value}%")
+        self.progress_bar.setValue(value)
 
     def finish_import(self):
-        self.progress_dialog.progress_dialog.close()
+        self.status_label.setText("Import complete.")
+        self.progress_bar.setValue(100)
+
+    def update_timestamp_status(self, current, total):
+        if total > 0:
+            self.status_label.setText(f"Timestamping file {current}/{total}")
 
     def set_output_folder(self, folder_path):
         self.output_folder_path = folder_path

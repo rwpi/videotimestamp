@@ -39,14 +39,19 @@ class ImportThread(QThread):
                             files_to_copy.append(file)
 
         # Copy the files and emit progress signals
+        total = len(files_to_copy)
+        if total == 0:
+            self.progress.emit(100)
+            self.finished.emit(str(folder_path), [])
+            return
+
+        new_files = []
         for i, file in enumerate(files_to_copy):
             destination = folder_path / file.name
             if not destination.exists():  # Only copy the file if it hasn't been copied already
                 shutil.copy(file, destination)
-            self.progress.emit((i + 1) * 100 // len(files_to_copy))
-
-        # Get the list of new files
-        new_files = [str(path) for path in Path(folder_path).rglob('*.MTS') if path.is_file()]
+            new_files.append(str(destination))
+            self.progress.emit((i + 1) * 100 // total)
 
         # Emit the path of the new folder and the list of new files when finished
         self.finished.emit(str(folder_path), new_files)

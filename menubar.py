@@ -1,4 +1,4 @@
-from PyQt5.QtWidgets import QAction
+from PyQt5.QtWidgets import QAction, QActionGroup
 import showsdcard
 
 def setup_menu_bar(window):
@@ -19,11 +19,22 @@ def setup_menu_bar(window):
     window.delete_input_files_action.setChecked(window.settings.value('delete_input_files', False, type=bool))
     window.delete_input_files_action.triggered.connect(window.save_settings)
     window.settings_menu.addAction(window.delete_input_files_action)
-    window.run_magic_renamer_when_finished_action = QAction("Run Renamer When Finished", window)
-    window.run_magic_renamer_when_finished_action.setCheckable(True)
-    window.run_magic_renamer_when_finished_action.setChecked(window.settings.value('run_magic_renamer_when_finished', False, type=bool))
-    window.run_magic_renamer_when_finished_action.triggered.connect(window.save_settings)
-    window.settings_menu.addAction(window.run_magic_renamer_when_finished_action)
+    window.date_format_menu = window.settings_menu.addMenu("Date Format")
+    window.date_format_group = QActionGroup(window)
+    date_formats = [
+        ("MM-DD-YYYY (US)", "%m-%d-%Y"),
+        ("DD-MM-YYYY (International)", "%d-%m-%Y"),
+    ]
+    current_format = window.settings.value('date_format', "%m-%d-%Y")
+    for label, fmt in date_formats:
+        action = QAction(label, window)
+        action.setCheckable(True)
+        action.setData(fmt)
+        if fmt == current_format:
+            action.setChecked(True)
+        action.triggered.connect(window.save_settings)
+        window.date_format_group.addAction(action)
+        window.date_format_menu.addAction(action)
     window.fixes_menu = window.menu_bar.addMenu("Fixes")
     window.manually_adjusted_for_dst_action = QAction("Manually set DST", window)
     window.manually_adjusted_for_dst_action.setCheckable(True)
@@ -46,6 +57,3 @@ def setup_menu_bar(window):
     show_sd_card_action = QAction('Show .MTS Files On SD Card', window)
     show_sd_card_action.triggered.connect(showsdcard.show_sd_card)
     window.tools_menu.addAction(show_sd_card_action)
-    window.magic_renamer_action = QAction("Automatic Renaming Tool", window)
-    window.magic_renamer_action.triggered.connect(window.launch_magic_renamer_gui)
-    window.tools_menu.addAction(window.magic_renamer_action)

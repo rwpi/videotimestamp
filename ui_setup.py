@@ -1,21 +1,7 @@
-from PyQt5.QtWidgets import QDialog, QVBoxLayout, QPushButton, QLabel, QHBoxLayout, QListWidget, QProgressBar
+from PyQt5.QtWidgets import QVBoxLayout, QPushButton, QLabel, QHBoxLayout, QListWidget, QProgressBar
 from PyQt5.QtCore import Qt, QTimer
 from datetime import datetime
 from hwaccel_filter import filter_hwaccel_methods
-
-class ProgressDialog(QDialog):
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("Timestamp")
-        self.setWindowFlags(self.windowFlags() & ~Qt.WindowContextHelpButtonHint)
-        self.setWindowTitle("Progress")
-        self.layout = QVBoxLayout()
-        self.setLayout(self.layout)
-        self.label = QLabel("Timestamping...")
-        self.label.setAlignment(Qt.AlignCenter)
-        self.layout.addWidget(self.label)
-        self.progress = QProgressBar()
-        self.layout.addWidget(self.progress)
 
 def setup_ui(self):
     self.choose_input_files_button = QPushButton("Choose Input Files")
@@ -63,8 +49,19 @@ def setup_ui(self):
     self.process_button.setEnabled(False)
     self.layout.addWidget(self.process_button)
 
-    self.progress_dialog = ProgressDialog(self)
-    self.progress_dialog.hide()
+    self.status_label = QLabel("Idle.")
+    self.status_label.setStyleSheet("color: grey; font-size: 10px;")
+    self.status_label.setAlignment(Qt.AlignCenter)
+    self.layout.addWidget(self.status_label)
+
+    self.progress_bar = QProgressBar()
+    self.progress_bar.setRange(0, 100)
+    self.progress_bar.setValue(0)
+    self.layout.addWidget(self.progress_bar)
+
+    self.rename_button = QPushButton("File Renaming Tool")
+    self.rename_button.clicked.connect(self.launch_video_renamer)
+    self.layout.addWidget(self.rename_button)
 
     self.timer = QTimer()
 

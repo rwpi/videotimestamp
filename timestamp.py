@@ -32,9 +32,10 @@ def get_resource_path(relative_path):
 
 class Worker(QThread):
     progressChanged = pyqtSignal(int)
+    progressDetail = pyqtSignal(int, int)
     finished = pyqtSignal()  
 
-    def __init__(self, files, output_folder_path, hwaccel_method, remove_audio, manually_adjusted_for_dst, add_hour, subtract_hour): 
+    def __init__(self, files, output_folder_path, hwaccel_method, remove_audio, manually_adjusted_for_dst, add_hour, subtract_hour, date_format): 
         super().__init__()
         self.files = files
         self.output_folder_path = output_folder_path
@@ -43,13 +44,14 @@ class Worker(QThread):
         self.manually_adjusted_for_dst = manually_adjusted_for_dst
         self.add_hour = add_hour
         self.subtract_hour = subtract_hour
+        self.date_format = date_format
 
     def run(self):
         self.process_videos(self.files, self.set_progress)
         self.finished.emit()
 
     def get_metadata_timestamp(self, file_path):
-        if sys.platform == "darwin":  # If the host machine is macOS
+        if sys.platform == "darwin" and getattr(sys, "frozen", False):  # If the host machine is macOS
             exiftool_path = os.path.join(sys._MEIPASS, 'exiftool', 'exiftool') # Use the bundled exiftool
         else:
             exiftool_path = get_resource_path('exiftool')
@@ -83,11 +85,13 @@ class Worker(QThread):
             f'"drawtext='
             f'text=\'%{{pts\\:localtime\\:{start_time_unix}\\:%X}}\': x=10: y=h-th-85: fontsize=48: fontcolor=white: shadowcolor=black: shadowx=2: shadowy=2, '
             f'drawtext='
-            f'text=\'%{{pts\\:localtime\\:{start_time_unix}\\:%m-%d-%Y}}\': x=10: y=h-th-40: fontsize=48: fontcolor=white: shadowcolor=black: shadowx=2: shadowy=2'
+            f'text=\'%{{pts\\:localtime\\:{start_time_unix}\\:{self.date_format}}}\': x=10: y=h-th-40: fontsize=48: fontcolor=white: shadowcolor=black: shadowx=2: shadowy=2'
         )
         command += f'" -c:v {self.hwaccel_method} -b:v 5000k'
         if self.remove_audio:
             command += ' -an'
+        else:
+            command += ' -map 0:v:0 -map 0:a:0? -c:a aac -b:a 192k -ac 2'
         command += f' "{output_file}"'
         result = subprocess.run(command, shell=True, capture_output=True, text=True, creationflags=(subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0))
         if result.stderr:
@@ -98,22 +102,24 @@ class Worker(QThread):
     def process_videos(self, files, set_progress):
         set_progress(0)
 
-        increment = 100 / len(files) if files else 0
+        total_files = len(files)
+        increment = 100 / total_files if total_files else 0
 
         progress = 0
 
-        for file_path in files:
+        for idx, file_path in enumerate(files, start=1):
             creation_date = self.get_metadata_timestamp(file_path)
             if creation_date:
                 creation_date = creation_date.split(': ', 1)[-1]  # Remove the 'Date/Time Original              :' part
                 start_time_unix = self.to_unix_timestamp(creation_date)
                 dt = datetime.datetime.fromtimestamp(start_time_unix)  # Convert the Unix timestamp back to a datetime
-                output_file_name = dt.strftime('%m-%d-%Y_%H-%M-%S') + ".mp4"
+                output_file_name = f"{dt.strftime(self.date_format)}_{dt.strftime('%H-%M-%S')}.mp4"
                 output_file = os.path.join(self.output_folder_path, output_file_name)
                 self.burn_timestamp(file_path, start_time_unix, output_file)
 
             progress += increment
             set_progress(int(progress))
+            self.progressDetail.emit(idx, total_files)
 
     def set_progress(self, value):
         self.progressChanged.emit(value)
