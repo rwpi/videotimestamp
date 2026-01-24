@@ -24,6 +24,8 @@ def setup_menu_bar(window):
     date_formats = [
         ("MM-DD-YYYY (US)", "%m-%d-%Y"),
         ("DD-MM-YYYY (International)", "%d-%m-%Y"),
+        ("Mon-DD-YYYY (Jan, Feb)", "%b-%d-%Y"),
+        ("DD-Mon-YYYY (Jan, Feb)", "%d-%b-%Y"),
     ]
     current_format = window.settings.value('date_format', "%m-%d-%Y")
     for label, fmt in date_formats:
@@ -51,7 +53,7 @@ def setup_menu_bar(window):
     window.subtract_hour_action.triggered.connect(window.save_settings)
     window.fixes_menu.addAction(window.subtract_hour_action)
     window.tools_menu = window.menu_bar.addMenu("Tools")
-    import_today_action = QAction('Import Today From SD Card', window)
+    import_today_action = QAction('Import From SD Card...', window)
     import_today_action.triggered.connect(window.start_import)
     window.tools_menu.addAction(import_today_action)
     show_sd_card_action = QAction('Show .MTS Files On SD Card', window)

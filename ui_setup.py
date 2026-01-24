@@ -4,6 +4,10 @@ from datetime import datetime
 from hwaccel_filter import filter_hwaccel_methods
 
 def setup_ui(self):
+    self.import_button = QPushButton("Import From SD Card")
+    self.import_button.clicked.connect(self.start_import)
+    self.layout.addWidget(self.import_button)
+
     self.choose_input_files_button = QPushButton("Choose Input Files")
     self.choose_input_files_button.clicked.connect(self.choose_input_files)
     self.layout.addWidget(self.choose_input_files_button)
@@ -49,7 +53,7 @@ def setup_ui(self):
     self.process_button.setEnabled(False)
     self.layout.addWidget(self.process_button)
 
-    self.status_label = QLabel("Idle.")
+    self.status_label = QLabel("Idle")
     self.status_label.setStyleSheet("color: grey; font-size: 10px;")
     self.status_label.setAlignment(Qt.AlignCenter)
     self.layout.addWidget(self.status_label)
@@ -57,6 +61,19 @@ def setup_ui(self):
     self.progress_bar = QProgressBar()
     self.progress_bar.setRange(0, 100)
     self.progress_bar.setValue(0)
+    self.progress_bar.setTextVisible(True)
+    self.progress_bar.setStyleSheet(
+        "QProgressBar {"
+        " border: 1px solid #4a4a4a;"
+        " border-radius: 4px;"
+        " text-align: center;"
+        " color: #d0d0d0;"
+        " background-color: #2b2b2b;"
+        "}"
+        "QProgressBar::chunk {"
+        " background-color: #2ea8ff;"
+        "}"
+    )
     self.layout.addWidget(self.progress_bar)
 
     self.rename_button = QPushButton("File Renaming Tool")

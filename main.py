@@ -1,6 +1,21 @@
 import sys, os
-from PyQt5.QtWidgets import QApplication, QWidget, QVBoxLayout, QLabel, QFileDialog, QMainWindow
-from PyQt5.QtCore import Qt, QSettings, QUrl
+from pathlib import Path
+from PyQt5.QtWidgets import (
+    QApplication,
+    QWidget,
+    QVBoxLayout,
+    QLabel,
+    QFileDialog,
+    QMainWindow,
+    QDialog,
+    QDialogButtonBox,
+    QDateEdit,
+    QFormLayout,
+    QHBoxLayout,
+    QPushButton,
+    QLabel,
+)
+from PyQt5.QtCore import Qt, QSettings, QUrl, QDate, QTimer
 from PyQt5.QtGui import QPixmap, QDesktopServices
 from timestamp import Worker
 from autodelete import delete_files
@@ -8,6 +23,111 @@ from importtoday import ImportThread
 from check_for_updates import check_for_updates
 from menubar import setup_menu_bar
 from ui_setup import setup_ui
+
+class ImportDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Import From SD Card")
+        self.setModal(True)
+
+        default_base = self._default_destination_base()
+        self.date_edit = QDateEdit()
+        self.date_edit.setCalendarPopup(True)
+        self.date_edit.setDate(QDate.currentDate())
+
+        self.destination_path = str(default_base)
+        self.destination_label = QLabel()
+        self.destination_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self._set_destination_display(self.destination_path)
+        browse_button = QPushButton("Browse")
+        browse_button.clicked.connect(self.browse_destination)
+
+        destination_row = QHBoxLayout()
+        destination_row.addWidget(self.destination_label)
+        destination_row.addWidget(browse_button)
+
+        self.sd_status_dot = QLabel()
+        self.sd_status_dot.setFixedSize(10, 10)
+        self.sd_status_dot.setStyleSheet("border-radius: 5px; background-color: #d9534f;")
+        self.sd_status_text = QLabel("Not detected")
+
+        sd_status_row = QHBoxLayout()
+        sd_status_row.addWidget(self.sd_status_dot)
+        sd_status_row.addSpacing(6)
+        sd_status_row.addWidget(self.sd_status_text)
+        sd_status_row.addStretch(1)
+
+        form_layout = QFormLayout()
+        form_layout.addRow("SD card status:", sd_status_row)
+        form_layout.addRow("Import date:", self.date_edit)
+        form_layout.addRow("Destination folder:", destination_row)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+
+        layout = QVBoxLayout()
+        layout.addLayout(form_layout)
+        layout.addWidget(buttons)
+        self.setLayout(layout)
+
+        self.sd_timer = QTimer(self)
+        self.sd_timer.setInterval(1000)
+        self.sd_timer.timeout.connect(self.update_sd_status)
+        self.sd_timer.start()
+        self.update_sd_status()
+
+    def _default_destination_base(self):
+        if os.name == "nt":
+            return os.path.join(os.path.expanduser("~"), "Videos")
+        return os.path.join(os.path.expanduser("~"), "Movies")
+
+    def _set_destination_display(self, path):
+        base_name = Path(path).name if path else ""
+        display_name = base_name or path
+        self.destination_label.setText(display_name)
+        if path:
+            self.destination_label.setToolTip(path)
+
+    def browse_destination(self):
+        start_dir = self.destination_path or self._default_destination_base()
+        folder = QFileDialog.getExistingDirectory(self, "Select import destination", start_dir)
+        if folder:
+            self.destination_path = folder
+            self._set_destination_display(folder)
+
+    def update_sd_status(self):
+        detected = self._has_sd_card()
+        if detected:
+            self.sd_status_dot.setStyleSheet("border-radius: 5px; background-color: #5cb85c;")
+            self.sd_status_text.setText("Detected")
+        else:
+            self.sd_status_dot.setStyleSheet("border-radius: 5px; background-color: #d9534f;")
+            self.sd_status_text.setText("Not detected")
+
+    def _has_sd_card(self):
+        if os.name == "nt":
+            drives = [f"{chr(letter)}:\\" for letter in range(67, 91)]
+        else:
+            volumes_path = Path("/Volumes")
+            if not volumes_path.is_dir():
+                return False
+            drives = [str(volume) for volume in volumes_path.iterdir() if volume.is_dir()]
+
+        for drive in drives:
+            drive_path = Path(drive)
+            if not drive_path.is_dir():
+                continue
+            for root in ("PRIVATE", "private"):
+                stream_path = drive_path / root / "AVCHD" / "BDMV" / "STREAM"
+                if stream_path.is_dir():
+                    return True
+        return False
+
+    def get_values(self):
+        selected_date = self.date_edit.date().toPyDate()
+        destination_base = self.destination_path or None
+        return selected_date, destination_base
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -52,6 +172,9 @@ class MainWindow(QMainWindow):
         from video_renamer_gui import MainWindow as VideoRenamerWindow
         initial_folder = self.output_folder_path or None
         self.video_renamer_window = VideoRenamerWindow(initial_folder=initial_folder)
+        self.video_renamer_window.run_started.connect(self.on_renamer_started)
+        self.video_renamer_window.progress_changed.connect(self.update_renamer_progress)
+        self.video_renamer_window.run_finished.connect(self.on_renamer_finished)
         self.video_renamer_window.show()
         self.position_video_renamer_window()
 
@@ -113,16 +236,20 @@ class MainWindow(QMainWindow):
         self.input_files = set()
         self.input_files_label.setText("0 Input Files Selected")
         self.input_files_list.clear()
+        self.choose_input_files_button.setEnabled(True)
         self.check_if_ready_to_process()
 
     def reset_output_folder(self):
         self.output_folder_path = ""
         self.output_folder_label.setText("Output Folder:")
+        self.choose_button.setEnabled(True)
         self.check_if_ready_to_process()
 
     def check_if_ready_to_process(self):
         if self.input_files and self.output_folder_path:
             self.process_button.setEnabled(True)
+            if self.status_label.text().startswith("Import Complete"):
+                self.process_button.setFocus()
         else:
             self.process_button.setEnabled(False)
 
@@ -140,11 +267,12 @@ class MainWindow(QMainWindow):
 
     def on_worker_finished(self):
         self.timer.stop()
-        self.status_label.setText("Timestamping complete.")
+        self.status_label.setText("Timestamping Complete")
         self.progress_bar.setValue(100)
         self.process_button.setEnabled(True)
         if self.settings.value('delete_input_files', False, type=bool):
             delete_files(self.input_files)
+        self.rename_button.setFocus()
 
     def open_folder(self):
         if self.output_folder_path:
@@ -162,37 +290,59 @@ class MainWindow(QMainWindow):
             self.worker = Worker(self.input_files, self.output_folder_path, hwaccel_method, remove_audio, manually_adjusted_for_dst, add_hour, subtract_hour, date_format)
             total_files = len(self.input_files)
             if total_files > 0:
-                self.status_label.setText(f"Timestamping file 1/{total_files}")
+                self.status_label.setText("Timestamping Files")
             else:
-                self.status_label.setText("Timestamping file 0/0")
+                self.status_label.setText("Timestamping Files")
             self.progress_bar.setValue(0)
             self.worker.progressChanged.connect(self.progress_bar.setValue)
             self.worker.progressDetail.connect(self.update_timestamp_status)
             self.worker.finished.connect(self.on_worker_finished)
             self.worker.start()
             self.process_button.setEnabled(False)
+            self.progress_bar.setFocus()
 
     def start_import(self):
-        self.import_thread = ImportThread()
+        dialog = ImportDialog(self)
+        if dialog.exec_() != QDialog.Accepted:
+            return
+        selected_date, destination_base = dialog.get_values()
+        self.import_thread = ImportThread(selected_date=selected_date, destination_base=destination_base)
         self.import_thread.progress.connect(self.update_progress)
         self.import_thread.finished.connect(self.finish_import)
         self.import_thread.start()
-        self.status_label.setText("Importing files...")
+        self.status_label.setText("Importing Files")
+        self.progress_bar.setFormat("%p%")
         self.progress_bar.setValue(0)
         self.import_thread.finished.connect(self.set_output_folder)
         self.import_thread.finished.connect(self.add_new_files)
 
     def update_progress(self, value):
-        self.status_label.setText(f"Importing files... {value}%")
         self.progress_bar.setValue(value)
 
-    def finish_import(self):
-        self.status_label.setText("Import complete.")
+    def on_renamer_started(self):
+        self.status_label.setText("Renaming Files")
+        self.progress_bar.setFormat("%p%")
+        self.progress_bar.setValue(0)
+
+    def update_renamer_progress(self, value):
+        self.progress_bar.setValue(value)
+
+    def on_renamer_finished(self):
+        self.status_label.setText("Renaming Complete")
         self.progress_bar.setValue(100)
+        self.progress_bar.setFormat("%p%")
+
+    def finish_import(self):
+        self.status_label.setText("Import Complete")
+        self.progress_bar.setValue(100)
+        self.progress_bar.setFormat("%p%")
+        self.process_button.setFocus()
+        self.choose_input_files_button.setEnabled(False)
+        self.choose_button.setEnabled(False)
 
     def update_timestamp_status(self, current, total):
         if total > 0:
-            self.status_label.setText(f"Timestamping file {current}/{total}")
+            self.status_label.setText("Timestamping Files")
 
     def set_output_folder(self, folder_path):
         self.output_folder_path = folder_path

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import datetime
+import subprocess
 import re
 import sys
 from dataclasses import dataclass
@@ -9,6 +10,7 @@ import cv2
 from PyQt5 import QtCore, QtGui, QtWidgets
 from PyQt5.QtCore import QSettings
 
+from timestamp import get_resource_path
 
 # ----------------------------
 # Helpers
@@ -56,6 +58,15 @@ def strip_existing_prefix_and_tags(stem: str) -> str:
     # Strip one or more trailing tags to avoid double-append when re-running.
     s = re.sub(r"(_(INTEGRITY|CLAIMANT|HUMAN|UNKNOWN|PERSON|SUBJECT|COVERT))+$", "", s, flags=re.IGNORECASE)
     return s
+
+
+def extract_trailing_tags(stem: str) -> str:
+    match = re.search(
+        r"(_(INTEGRITY|CLAIMANT|HUMAN|UNKNOWN|PERSON|SUBJECT|COVERT))+$",
+        stem,
+        flags=re.IGNORECASE,
+    )
+    return match.group(1) if match else ""
 
 
 def get_duration_seconds(video_path: Path) -> float | None:
@@ -128,7 +139,7 @@ def preferred_date_order_from_settings() -> str | None:
     if isinstance(fmt, str):
         if fmt.startswith("%d"):
             return "DMY"
-        if fmt.startswith("%m"):
+        if fmt.startswith("%m") or fmt.startswith("%b"):
             return "MDY"
     return None
 
@@ -137,13 +148,26 @@ def parse_clip_datetime(value: str, preferred_order: str | None = None) -> datet
     try:
         date_part, _ = value.split("_", 1)
         a_str, b_str, _ = date_part.split("-", 2)
-        a = int(a_str)
-        b = int(b_str)
+        a_is_alpha = a_str.isalpha()
+        b_is_alpha = b_str.isalpha()
+        if not a_is_alpha:
+            a = int(a_str)
+        else:
+            a = None
+        if not b_is_alpha:
+            b = int(b_str)
+        else:
+            b = None
     except ValueError:
         a = b = None
+        a_is_alpha = b_is_alpha = False
 
     formats = []
-    if a is not None and b is not None:
+    if a_is_alpha and not b_is_alpha:
+        formats.append("%b-%d-%Y_%H-%M-%S")
+    elif b_is_alpha and not a_is_alpha:
+        formats.append("%d-%b-%Y_%H-%M-%S")
+    elif a is not None and b is not None:
         if a > 12 and b <= 12:
             formats.append("%d-%m-%Y_%H-%M-%S")
         elif b > 12 and a <= 12:
@@ -153,12 +177,18 @@ def parse_clip_datetime(value: str, preferred_order: str | None = None) -> datet
         elif preferred_order == "MDY":
             formats.append("%m-%d-%Y_%H-%M-%S")
 
+    fallback_formats = [
+        "%m-%d-%Y_%H-%M-%S",
+        "%d-%m-%Y_%H-%M-%S",
+        "%b-%d-%Y_%H-%M-%S",
+        "%d-%b-%Y_%H-%M-%S",
+    ]
     if not formats:
-        formats = ["%m-%d-%Y_%H-%M-%S", "%d-%m-%Y_%H-%M-%S"]
-    elif formats[0].startswith("%m"):
-        formats.append("%d-%m-%Y_%H-%M-%S")
+        formats = fallback_formats
     else:
-        formats.append("%m-%d-%Y_%H-%M-%S")
+        for fmt in fallback_formats:
+            if fmt not in formats:
+                formats.append(fmt)
 
     for fmt in formats:
         try:
@@ -168,14 +198,95 @@ def parse_clip_datetime(value: str, preferred_order: str | None = None) -> datet
     return None
 
 
+def parse_exif_datetime(value: str) -> datetime.datetime | None:
+    value = value.strip()
+    if not value:
+        return None
+    value = value.replace(" DST", "")
+    for fmt in ("%Y:%m:%d %H:%M:%S%z", "%Y:%m:%d %H:%M:%S"):
+        try:
+            return datetime.datetime.strptime(value, fmt)
+        except ValueError:
+            continue
+    return None
+
+
+def get_lawmate_exif_datetime(video_path: Path) -> datetime.datetime | None:
+    if sys.platform == "darwin" and getattr(sys, "frozen", False):
+        exiftool_path = str(Path(sys._MEIPASS) / "exiftool" / "exiftool")
+    else:
+        exiftool_path = get_resource_path("exiftool")
+    result = subprocess.run(
+        [
+            exiftool_path,
+            "-s",
+            "-s",
+            "-s",
+            "-DateTimeOriginal",
+            "-CreateDate",
+            "-MediaCreateDate",
+            "-TrackCreateDate",
+            "-ModifyDate",
+            str(video_path),
+        ],
+        capture_output=True,
+        text=True,
+        creationflags=(subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0),
+    )
+    if not result.stdout:
+        return None
+    for line in result.stdout.splitlines():
+        dt = parse_exif_datetime(line)
+        if dt:
+            return dt
+    return None
+
+
+def lawmate_rename(
+    videos: list[Path],
+    date_format: str,
+    manually_adjusted_for_dst: bool,
+    add_hour: bool,
+    subtract_hour: bool,
+    dry_run: bool,
+    log,
+) -> None:
+    for vp in videos:
+        if vp.suffix.lower() != ".mov":
+            continue
+        dt = get_lawmate_exif_datetime(vp)
+        if not dt:
+            log(f"Lawmate: no EXIF timestamp for {vp.name}")
+            continue
+        if manually_adjusted_for_dst:
+            dt = dt - datetime.timedelta(hours=1)
+        if add_hour:
+            dt = dt + datetime.timedelta(hours=1)
+        if subtract_hour:
+            dt = dt - datetime.timedelta(hours=1)
+        if dt.tzinfo is not None:
+            dt = datetime.datetime.fromtimestamp(int(dt.timestamp()))
+        date_label = dt.strftime(date_format)
+        time_label = dt.strftime("%H-%M-%S")
+        tag_suffix = extract_trailing_tags(vp.stem)
+        dst = vp.with_name(f"{date_label}_{time_label}{tag_suffix}{vp.suffix}")
+        if vp.name == dst.name:
+            log(f"Lawmate: OK {vp.name}")
+            continue
+        safe_rename(vp, dst, dry_run=dry_run, log=log)
+
+
 def cliporder_rename(directory: Path, dry_run: bool, log) -> None:
     """
     Same approach as your module:
-    - looks for MM-DD-YYYY_HH-MM-SS or DD-MM-YYYY_HH-MM-SS anywhere in filename
+    - looks for MM-DD-YYYY_HH-MM-SS, DD-MM-YYYY_HH-MM-SS, or Mon-DD-YYYY_HH-MM-SS anywhere in filename
     - sorts by that datetime
     - renames to CLIP#_<original> (after stripping any existing CLIP#_)
     """
-    pattern = re.compile(r"(\d{2}-\d{2}-\d{4}_\d{2}-\d{2}-\d{2})")
+    pattern = re.compile(
+        r"((?:\d{2}|[A-Za-z]{3})-(?:\d{2}|[A-Za-z]{3})-\d{4}_\d{2}-\d{2}-\d{2})",
+        re.IGNORECASE,
+    )
     items: list[tuple[datetime.datetime, Path]] = []
 
     for p in directory.iterdir():
@@ -253,6 +364,7 @@ class TaggerConfig:
     use_clip_numbers: bool
     use_ai_detection: bool
     human_tag: str
+    rename_lawmate_files: bool
 
 
 class VideoTaggerWorker(QtCore.QObject):
@@ -296,6 +408,30 @@ class VideoTaggerWorker(QtCore.QObject):
         if not videos:
             self.log.emit("No videos found.")
             return
+
+        if cfg.rename_lawmate_files:
+            settings = QSettings("VideoTimestamp", "VTS")
+            date_format = settings.value("date_format", "%m-%d-%Y")
+            if not isinstance(date_format, str) or not date_format:
+                date_format = "%m-%d-%Y"
+            manually_adjusted_for_dst = settings.value("manually_adjusted_for_dst", False, type=bool)
+            add_hour = settings.value("add_hour", False, type=bool)
+            subtract_hour = settings.value("subtract_hour", False, type=bool)
+            self.log.emit("Renaming Lawmate files from EXIF timestamps...")
+            try:
+                lawmate_rename(
+                    videos=videos,
+                    date_format=date_format,
+                    manually_adjusted_for_dst=manually_adjusted_for_dst,
+                    add_hour=add_hour,
+                    subtract_hour=subtract_hour,
+                    dry_run=cfg.dry_run,
+                    log=self.log.emit,
+                )
+            except Exception as exc:
+                self.log.emit(f"Warning: Lawmate rename failed ({exc}).")
+            if not cfg.dry_run:
+                videos = sorted([p for p in folder.iterdir() if p.is_file() and p.suffix.lower() in exts])
 
         yolo_model = None
         if cfg.use_ai_detection:
@@ -379,6 +515,11 @@ class VideoTaggerWorker(QtCore.QObject):
 
 
 class MainWindow(QtWidgets.QMainWindow):
+    status_changed = QtCore.pyqtSignal(str)
+    progress_changed = QtCore.pyqtSignal(int)
+    run_started = QtCore.pyqtSignal()
+    run_finished = QtCore.pyqtSignal()
+
     def __init__(self, initial_folder: str | None = None):
         super().__init__()
         self.setWindowTitle("Video Renamer")
@@ -439,6 +580,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.clip_numbers_check = QtWidgets.QCheckBox("Tag clip number")
         self.clip_numbers_check.setChecked(True)
 
+        self.lawmate_rename_check = QtWidgets.QCheckBox("Rename Lawmate Files")
+
         self.human_tag_combo = QtWidgets.QComboBox()
         self.human_tag_combo.addItems(["HUMAN", "CLAIMANT", "SUBJECT"])
 
@@ -466,6 +609,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         form.addRow("", self.clip_numbers_check)
         form.addRow("", self.ai_detection_check)
+        form.addRow("", self.lawmate_rename_check)
         human_tag_row = QtWidgets.QHBoxLayout()
         human_tag_row.addWidget(QtWidgets.QLabel("Tag humans as:"))
         human_tag_row.addWidget(self.human_tag_combo)
@@ -491,11 +635,41 @@ class MainWindow(QtWidgets.QMainWindow):
         layout.addWidget(self.logo_label)
         layout.addLayout(form)
         layout.addLayout(button_row)
-        layout.addWidget(self.status_label)
-        layout.addWidget(self.progress_bar)
+        # Status/progress shown in main window now.
 
         self.folder_btn.clicked.connect(self._choose_folder)
         self.run_btn.clicked.connect(self._start)
+        self._load_settings()
+        self._wire_settings_saves()
+
+    def _settings(self):
+        return QSettings("VideoTimestamp", "VTS")
+
+    def _load_settings(self):
+        settings = self._settings()
+        self.clip_numbers_check.setChecked(settings.value("vrn/clip_numbers", True, type=bool))
+        self.ai_detection_check.setChecked(settings.value("vrn/ai_detection", True, type=bool))
+        self.lawmate_rename_check.setChecked(settings.value("vrn/lawmate_rename", False, type=bool))
+        self.conf_spin.setValue(settings.value("vrn/ai_confidence", 55, type=int))
+        tag = settings.value("vrn/human_tag", "HUMAN")
+        index = self.human_tag_combo.findText(str(tag).upper())
+        if index >= 0:
+            self.human_tag_combo.setCurrentIndex(index)
+
+    def _save_settings(self):
+        settings = self._settings()
+        settings.setValue("vrn/clip_numbers", self.clip_numbers_check.isChecked())
+        settings.setValue("vrn/ai_detection", self.ai_detection_check.isChecked())
+        settings.setValue("vrn/lawmate_rename", self.lawmate_rename_check.isChecked())
+        settings.setValue("vrn/ai_confidence", self.conf_spin.value())
+        settings.setValue("vrn/human_tag", self.human_tag_combo.currentText().strip().upper())
+
+    def _wire_settings_saves(self):
+        self.clip_numbers_check.toggled.connect(self._save_settings)
+        self.ai_detection_check.toggled.connect(self._save_settings)
+        self.lawmate_rename_check.toggled.connect(self._save_settings)
+        self.conf_spin.valueChanged.connect(self._save_settings)
+        self.human_tag_combo.currentIndexChanged.connect(self._save_settings)
 
     def _choose_folder(self):
         path = QtWidgets.QFileDialog.getExistingDirectory(self, "Select Folder")
@@ -532,11 +706,16 @@ class MainWindow(QtWidgets.QMainWindow):
             use_clip_numbers=self.clip_numbers_check.isChecked(),
             use_ai_detection=self.ai_detection_check.isChecked(),
             human_tag=self.human_tag_combo.currentText().strip().upper() or "HUMAN",
+            rename_lawmate_files=self.lawmate_rename_check.isChecked(),
         )
 
         self.progress_bar.setValue(0)
-        self.status_label.setText("Starting...")
+        self.status_label.setText("Starting")
+        self.status_changed.emit("Starting")
+        self.progress_changed.emit(0)
+        self.run_started.emit()
         self._set_running(True)
+        self.hide()
 
         self._thread = QtCore.QThread()
         self._worker = VideoTaggerWorker(cfg)
@@ -555,12 +734,15 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _append_log(self, text: str):
         self.status_label.setText(text)
+        self.status_changed.emit(text)
 
     def _set_progress(self, current: int, total: int):
         if total <= 0:
-            self.progress_bar.setValue(0)
+            value = 0
         else:
-            self.progress_bar.setValue(int((current / total) * 100))
+            value = int((current / total) * 100)
+        self.progress_bar.setValue(value)
+        self.progress_changed.emit(value)
 
     def _show_error(self, text: str):
         QtWidgets.QMessageBox.critical(self, "Error", text)
@@ -568,6 +750,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _on_worker_finished(self):
         self._set_running(False)
+        self.run_finished.emit()
 
 
 def main():
