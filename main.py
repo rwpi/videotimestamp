@@ -14,6 +14,7 @@ from PyQt5.QtWidgets import (
     QHBoxLayout,
     QPushButton,
     QLabel,
+    QCheckBox,
 )
 from PyQt5.QtCore import Qt, QSettings, QUrl, QDate, QTimer
 from PyQt5.QtGui import QPixmap, QDesktopServices
@@ -23,12 +24,14 @@ from importtoday import ImportThread
 from check_for_updates import check_for_updates
 from menubar import setup_menu_bar
 from ui_setup import setup_ui
+import showsdcard
 
 class ImportDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Import From SD Card")
         self.setModal(True)
+        self.settings = QSettings("VideoTimestamp", "VTS")
 
         default_base = self._default_destination_base()
         self.date_edit = QDateEdit()
@@ -49,18 +52,31 @@ class ImportDialog(QDialog):
         self.sd_status_dot = QLabel()
         self.sd_status_dot.setFixedSize(10, 10)
         self.sd_status_dot.setStyleSheet("border-radius: 5px; background-color: #d9534f;")
-        self.sd_status_text = QLabel("Not detected")
+        self.sd_status_text = QLabel("Not Detected")
+        status_width = self.sd_status_text.fontMetrics().horizontalAdvance("Not Detected") + 6
+        self.sd_status_text.setFixedWidth(status_width)
+        self.sd_status_button = QPushButton("Open")
+        self.sd_status_button.setEnabled(False)
+        self.sd_status_button.clicked.connect(self._open_sd_card_mts)
 
         sd_status_row = QHBoxLayout()
         sd_status_row.addWidget(self.sd_status_dot)
         sd_status_row.addSpacing(6)
         sd_status_row.addWidget(self.sd_status_text)
+        sd_status_row.addWidget(self.sd_status_button)
         sd_status_row.addStretch(1)
+
+        self.skip_duplicates_checkbox = QCheckBox("Avoid Duplicates")
+        self.skip_duplicates_checkbox.setChecked(
+            self.settings.value("skip_duplicates", True, type=bool)
+        )
+        self.skip_duplicates_checkbox.toggled.connect(self._on_skip_duplicates_toggled)
 
         form_layout = QFormLayout()
         form_layout.addRow("SD card status:", sd_status_row)
         form_layout.addRow("Import date:", self.date_edit)
         form_layout.addRow("Destination folder:", destination_row)
+        form_layout.addRow("", self.skip_duplicates_checkbox)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.accepted.connect(self.accept)
@@ -89,6 +105,9 @@ class ImportDialog(QDialog):
         if path:
             self.destination_label.setToolTip(path)
 
+    def _on_skip_duplicates_toggled(self, checked):
+        self.settings.setValue("skip_duplicates", checked)
+
     def browse_destination(self):
         start_dir = self.destination_path or self._default_destination_base()
         folder = QFileDialog.getExistingDirectory(self, "Select import destination", start_dir)
@@ -101,9 +120,11 @@ class ImportDialog(QDialog):
         if detected:
             self.sd_status_dot.setStyleSheet("border-radius: 5px; background-color: #5cb85c;")
             self.sd_status_text.setText("Detected")
+            self.sd_status_button.setEnabled(True)
         else:
             self.sd_status_dot.setStyleSheet("border-radius: 5px; background-color: #d9534f;")
-            self.sd_status_text.setText("Not detected")
+            self.sd_status_text.setText("Not Detected")
+            self.sd_status_button.setEnabled(False)
 
     def _has_sd_card(self):
         if os.name == "nt":
@@ -124,10 +145,14 @@ class ImportDialog(QDialog):
                     return True
         return False
 
+    def _open_sd_card_mts(self, _link):
+        showsdcard.show_sd_card()
+
     def get_values(self):
         selected_date = self.date_edit.date().toPyDate()
         destination_base = self.destination_path or None
-        return selected_date, destination_base
+        skip_duplicates = self.skip_duplicates_checkbox.isChecked()
+        return selected_date, destination_base, skip_duplicates
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -271,12 +296,26 @@ class MainWindow(QMainWindow):
         self.progress_bar.setValue(100)
         self.process_button.setEnabled(True)
         if self.settings.value('delete_input_files', False, type=bool):
-            delete_files(self.input_files)
+            delete_files(self._files_within_output_folder(self.input_files))
         self.rename_button.setFocus()
 
     def open_folder(self):
         if self.output_folder_path:
             QDesktopServices.openUrl(QUrl.fromLocalFile(self.output_folder_path))
+
+    def _files_within_output_folder(self, paths):
+        if not self.output_folder_path:
+            return []
+        output_root = Path(self.output_folder_path).expanduser().resolve()
+        safe_paths = []
+        for path in paths:
+            try:
+                resolved = Path(path).expanduser().resolve()
+                resolved.relative_to(output_root)
+            except Exception:
+                continue
+            safe_paths.append(str(resolved))
+        return safe_paths
 
     def main(self):
         if self.input_files:
@@ -305,8 +344,12 @@ class MainWindow(QMainWindow):
         dialog = ImportDialog(self)
         if dialog.exec_() != QDialog.Accepted:
             return
-        selected_date, destination_base = dialog.get_values()
-        self.import_thread = ImportThread(selected_date=selected_date, destination_base=destination_base)
+        selected_date, destination_base, skip_duplicates = dialog.get_values()
+        self.import_thread = ImportThread(
+            selected_date=selected_date,
+            destination_base=destination_base,
+            skip_duplicates=skip_duplicates,
+        )
         self.import_thread.progress.connect(self.update_progress)
         self.import_thread.finished.connect(self.finish_import)
         self.import_thread.start()

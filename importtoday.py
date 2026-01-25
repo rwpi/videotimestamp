@@ -6,6 +6,7 @@ import os
 import subprocess
 import sys
 import re
+import hashlib
 
 from timestamp import get_resource_path
 
@@ -13,10 +14,11 @@ class ImportThread(QThread):
     progress = pyqtSignal(int)
     finished = pyqtSignal(str, list)  # Emit the path of the new folder and the list of new files when finished
 
-    def __init__(self, selected_date=None, destination_base=None):
+    def __init__(self, selected_date=None, destination_base=None, skip_duplicates=True):
         super().__init__()
         self.selected_date = selected_date
         self.destination_base = destination_base
+        self.skip_duplicates = skip_duplicates
 
     def run(self):
         # Get today's date as a string
@@ -73,7 +75,7 @@ class ImportThread(QThread):
             self.finished.emit(str(folder_path), [])
             return
 
-        def expected_output_name(file_path: Path) -> str | None:
+        def read_datetime_original(file_path: Path) -> datetime.datetime | None:
             if sys.platform == "darwin" and getattr(sys, "frozen", False):
                 exiftool_path = os.path.join(sys._MEIPASS, "exiftool", "exiftool")
             else:
@@ -89,9 +91,11 @@ class ImportThread(QThread):
             date_str = result.stdout.strip().split(": ", 1)[-1]
             date_str = date_str.replace(" DST", "")
             try:
-                dt = datetime.datetime.strptime(date_str, "%Y:%m:%d %H:%M:%S%z")
+                return datetime.datetime.strptime(date_str, "%Y:%m:%d %H:%M:%S%z")
             except ValueError:
                 return None
+
+        def expected_output_name(dt: datetime.datetime) -> str:
             if manually_adjusted_for_dst:
                 dt = dt - datetime.timedelta(hours=1)
             if add_hour:
@@ -118,19 +122,61 @@ class ImportThread(QThread):
                     return True
             return False
 
+        def ledger_key_for_folder(target_folder: Path) -> str:
+            digest = hashlib.sha1(str(target_folder).encode("utf-8")).hexdigest()
+            return f"import_ledger/{digest}"
+
+        def load_import_ledger(target_folder: Path) -> list[str]:
+            ledger_entries = settings.value(ledger_key_for_folder(target_folder), [], type=list)
+            if ledger_entries is None:
+                return []
+            if isinstance(ledger_entries, list):
+                return [str(entry) for entry in ledger_entries]
+            return [str(ledger_entries)]
+
+        def fingerprint_for_file(file_path: Path, dt: datetime.datetime | None) -> str:
+            size = file_path.stat().st_size
+            if dt:
+                return f"{dt.isoformat()}|{size}|{file_path.name}"
+            return f"NOEXIF|{size}|{file_path.name}"
+
+        max_ledger_entries = 5000
+        import_ledger_list = load_import_ledger(folder_path) if self.skip_duplicates else []
+        import_ledger_set = set(import_ledger_list)
+        ledger_updated = False
+
         new_files = []
         for i, file in enumerate(files_to_copy):
-            expected_name = expected_output_name(file)
-            if expected_name:
-                expected_stem = Path(expected_name).stem
-                if (folder_path / expected_name).exists() or has_processed_match(expected_stem):
+            if self.skip_duplicates:
+                raw_dt = read_datetime_original(file)
+                fingerprint = fingerprint_for_file(file, raw_dt)
+                if fingerprint in import_ledger_set:
                     self.progress.emit((i + 1) * 100 // total)
                     continue
+                if raw_dt:
+                    expected_name = expected_output_name(raw_dt)
+                    expected_stem = Path(expected_name).stem
+                    if (folder_path / expected_name).exists() or has_processed_match(expected_stem):
+                        self.progress.emit((i + 1) * 100 // total)
+                        continue
             destination = folder_path / file.name
             if not destination.exists():  # Only copy the file if it hasn't been copied already
                 shutil.copy(file, destination)
             new_files.append(str(destination))
+            if self.skip_duplicates:
+                if fingerprint not in import_ledger_set:
+                    import_ledger_set.add(fingerprint)
+                    import_ledger_list.append(fingerprint)
+                    if len(import_ledger_list) > max_ledger_entries:
+                        overflow = len(import_ledger_list) - max_ledger_entries
+                        for _ in range(overflow):
+                            removed = import_ledger_list.pop(0)
+                            import_ledger_set.discard(removed)
+                    ledger_updated = True
             self.progress.emit((i + 1) * 100 // total)
+
+        if ledger_updated:
+            settings.setValue(ledger_key_for_folder(folder_path), import_ledger_list)
 
         # Emit the path of the new folder and the list of new files when finished
         self.finished.emit(str(folder_path), new_files)

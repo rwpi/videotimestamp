@@ -1,5 +1,4 @@
 from PyQt5.QtWidgets import QAction, QActionGroup
-import showsdcard
 
 def setup_menu_bar(window):
     window.menu_bar = window.menuBar()
@@ -14,7 +13,7 @@ def setup_menu_bar(window):
     window.remove_audio_action.setChecked(window.settings.value('remove_audio', True, type=bool))
     window.remove_audio_action.triggered.connect(window.save_settings)
     window.settings_menu.addAction(window.remove_audio_action)
-    window.delete_input_files_action = QAction("Delete Input Files When Finished", window)
+    window.delete_input_files_action = QAction("Clean Up Old Files", window)
     window.delete_input_files_action.setCheckable(True)
     window.delete_input_files_action.setChecked(window.settings.value('delete_input_files', False, type=bool))
     window.delete_input_files_action.triggered.connect(window.save_settings)
@@ -37,8 +36,8 @@ def setup_menu_bar(window):
         action.triggered.connect(window.save_settings)
         window.date_format_group.addAction(action)
         window.date_format_menu.addAction(action)
-    window.fixes_menu = window.menu_bar.addMenu("Fixes")
-    window.manually_adjusted_for_dst_action = QAction("Manually set DST", window)
+    window.fixes_menu = window.settings_menu.addMenu("Time Correction")
+    window.manually_adjusted_for_dst_action = QAction("Sony DST Fix", window)
     window.manually_adjusted_for_dst_action.setCheckable(True)
     window.manually_adjusted_for_dst_action.triggered.connect(window.save_settings)
     window.fixes_menu.addAction(window.manually_adjusted_for_dst_action)
@@ -52,10 +51,3 @@ def setup_menu_bar(window):
     window.subtract_hour_action.setChecked(window.settings.value('subtract_hour', False, type=bool))
     window.subtract_hour_action.triggered.connect(window.save_settings)
     window.fixes_menu.addAction(window.subtract_hour_action)
-    window.tools_menu = window.menu_bar.addMenu("Tools")
-    import_today_action = QAction('Import From SD Card...', window)
-    import_today_action.triggered.connect(window.start_import)
-    window.tools_menu.addAction(import_today_action)
-    show_sd_card_action = QAction('Show .MTS Files On SD Card', window)
-    show_sd_card_action.triggered.connect(showsdcard.show_sd_card)
-    window.tools_menu.addAction(show_sd_card_action)
