@@ -15,6 +15,7 @@ from PyQt5.QtWidgets import (
     QPushButton,
     QLabel,
     QCheckBox,
+    QMessageBox,
 )
 from PyQt5.QtCore import Qt, QSettings, QUrl, QDate, QTimer
 from PyQt5.QtGui import QPixmap, QDesktopServices
@@ -34,11 +35,14 @@ class ImportDialog(QDialog):
         self.settings = QSettings("VideoTimestamp", "VTS")
 
         default_base = self._default_destination_base()
+        saved_destination = self.settings.value("import_destination_base", default_base)
+        if not isinstance(saved_destination, str) or not saved_destination:
+            saved_destination = default_base
         self.date_edit = QDateEdit()
         self.date_edit.setCalendarPopup(True)
         self.date_edit.setDate(QDate.currentDate())
 
-        self.destination_path = str(default_base)
+        self.destination_path = str(saved_destination)
         self.destination_label = QLabel()
         self.destination_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         self._set_destination_display(self.destination_path)
@@ -113,6 +117,7 @@ class ImportDialog(QDialog):
         folder = QFileDialog.getExistingDirectory(self, "Select import destination", start_dir)
         if folder:
             self.destination_path = folder
+            self.settings.setValue("import_destination_base", folder)
             self._set_destination_display(folder)
 
     def update_sd_status(self):
@@ -248,7 +253,14 @@ class MainWindow(QMainWindow):
             self.check_if_ready_to_process()
 
     def choose_input_files(self):
-        new_input_files, _ = QFileDialog.getOpenFileNames(self, 'Select .MTS files', '', 'MTS Files (*.MTS)')
+        allow_mp4_files = self.settings.value('timestamp_mp4_files_experimental', False, type=bool)
+        file_filter = 'Video Files (*.MTS *.mts *.MP4 *.mp4)' if allow_mp4_files else 'MTS Files (*.MTS *.mts)'
+        new_input_files, _ = QFileDialog.getOpenFileNames(
+            self,
+            'Select video files',
+            '',
+            file_filter
+        )
         if new_input_files:
             self.input_files.update(new_input_files)
             self.input_files_label.setText(f"{len(self.input_files)} Input Files Selected")
@@ -285,6 +297,10 @@ class MainWindow(QMainWindow):
         self.settings.setValue('add_hour', self.add_hour_action.isChecked())
         self.settings.setValue('subtract_hour', self.subtract_hour_action.isChecked())
         self.settings.setValue('delete_input_files', self.delete_input_files_action.isChecked())
+        self.settings.setValue(
+            'timestamp_mp4_files_experimental',
+            self.timestamp_mp4_files_action.isChecked(),
+        )
         if hasattr(self, "date_format_group"):
             selected = self.date_format_group.checkedAction()
             if selected:
@@ -317,6 +333,32 @@ class MainWindow(QMainWindow):
             safe_paths.append(str(resolved))
         return safe_paths
 
+    def _default_import_destination_base(self):
+        if os.name == "nt":
+            return str(Path.home() / "Videos")
+        return str(Path.home() / "Movies")
+
+    def _preflight_import_destination(self, destination_base):
+        base_path = Path(destination_base or self._default_import_destination_base()).expanduser()
+        probe_file = base_path / f".vts_write_test_{os.getpid()}"
+        try:
+            base_path.mkdir(parents=True, exist_ok=True)
+            with probe_file.open("w", encoding="utf-8") as handle:
+                handle.write("ok")
+            try:
+                probe_file.unlink()
+            except OSError:
+                pass
+            return True, ""
+        except PermissionError:
+            return (
+                False,
+                "The selected destination is not writable. "
+                "Choose another folder or grant file access in System Settings > Privacy & Security > Files and Folders.",
+            )
+        except OSError as exc:
+            return False, f"Cannot write to the selected destination: {exc}"
+
     def main(self):
         if self.input_files:
             self.timer.start(500)
@@ -345,6 +387,11 @@ class MainWindow(QMainWindow):
         if dialog.exec_() != QDialog.Accepted:
             return
         selected_date, destination_base, skip_duplicates = dialog.get_values()
+        can_write, error_message = self._preflight_import_destination(destination_base)
+        if not can_write:
+            self.status_label.setText("Import Failed")
+            QMessageBox.warning(self, "Import Destination Unavailable", error_message)
+            return
         self.import_thread = ImportThread(
             selected_date=selected_date,
             destination_base=destination_base,
@@ -352,6 +399,7 @@ class MainWindow(QMainWindow):
         )
         self.import_thread.progress.connect(self.update_progress)
         self.import_thread.finished.connect(self.finish_import)
+        self.import_thread.error.connect(self.handle_import_error)
         self.import_thread.start()
         self.status_label.setText("Importing Files")
         self.progress_bar.setFormat("%p%")
@@ -382,6 +430,11 @@ class MainWindow(QMainWindow):
         self.process_button.setFocus()
         self.choose_input_files_button.setEnabled(False)
         self.choose_button.setEnabled(False)
+
+    def handle_import_error(self, message):
+        self.status_label.setText("Import Failed")
+        self.progress_bar.setFormat("%p%")
+        QMessageBox.critical(self, "Import Error", message)
 
     def update_timestamp_status(self, current, total):
         if total > 0:

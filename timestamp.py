@@ -1,6 +1,7 @@
 import subprocess
 import os
 import datetime
+import re
 from PyQt5.QtCore import QThread, pyqtSignal
 import sys
 import stat
@@ -55,18 +56,66 @@ class Worker(QThread):
             exiftool_path = os.path.join(sys._MEIPASS, 'exiftool', 'exiftool') # Use the bundled exiftool
         else:
             exiftool_path = get_resource_path('exiftool')
-        result = subprocess.run([exiftool_path, '-DateTimeOriginal', file_path], capture_output=True, text=True, creationflags=(subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0))
+        result = subprocess.run(
+            [
+                exiftool_path,
+                '-s', '-s', '-s',
+                '-DateTimeOriginal',
+                '-CreateDate',
+                '-MediaCreateDate',
+                '-TrackCreateDate',
+                '-CreationDateValue',
+                '-LastUpdate',
+                '-ModifyDate',
+                '-TimeZone',
+                file_path,
+            ],
+            capture_output=True,
+            text=True,
+            creationflags=(subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0),
+        )
         if result.stderr:
             print("Error:", result.stderr)
         if result.stdout:
             print("Output:", result.stdout)
-        timestamp = result.stdout.strip()
-        return timestamp
+        timestamps = []
+        tz_offset = None
+        for line in result.stdout.splitlines():
+            value = line.strip()
+            if not value or value == "0000:00:00 00:00:00":
+                continue
+            if re.match(r"^[+-]\d{2}:?\d{2}$", value):
+                tz_offset = value
+                continue
+            has_tz = bool(re.search(r"(Z|[+-]\d{2}:?\d{2})$", value))
+            timestamps.append((value, has_tz))
+        for value, has_tz in timestamps:
+            if has_tz:
+                return value, None
+        return (timestamps[0][0], tz_offset) if timestamps else ("", tz_offset)
 
-    def to_unix_timestamp(self, date_str):
-        date_str = date_str.split(': ', 1)[-1]  # Remove the 'Date/Time Original              :' part
-        date_str = date_str.replace(" DST", "")  # Remove ' DST' if present
-        dt = datetime.datetime.strptime(date_str, '%Y:%m:%d %H:%M:%S%z')
+    def to_unix_timestamp(self, date_str, tz_offset=None):
+        date_str = date_str.replace(" DST", "").strip()  # Remove ' DST' if present
+        if date_str.endswith("Z"):
+            date_str = f"{date_str[:-1]}+0000"
+        try:
+            dt = datetime.datetime.strptime(date_str, '%Y:%m:%d %H:%M:%S%z')
+        except ValueError:
+            dt = datetime.datetime.strptime(date_str, '%Y:%m:%d %H:%M:%S')
+            if tz_offset:
+                tz_match = re.match(r"^([+-])(\d{2}):?(\d{2})$", tz_offset)
+                if tz_match:
+                    sign, hours, minutes = tz_match.groups()
+                    offset_minutes = int(hours) * 60 + int(minutes)
+                    if sign == "-":
+                        offset_minutes = -offset_minutes
+                    dt = dt.replace(tzinfo=datetime.timezone(datetime.timedelta(minutes=offset_minutes)))
+                else:
+                    local_tz = datetime.datetime.now().astimezone().tzinfo
+                    dt = dt.replace(tzinfo=local_tz)
+            else:
+                local_tz = datetime.datetime.now().astimezone().tzinfo
+                dt = dt.replace(tzinfo=local_tz)
         if self.manually_adjusted_for_dst:
             dt = dt - datetime.timedelta(hours=1)  # Adjust for DST
         if self.add_hour:
@@ -79,13 +128,24 @@ class Worker(QThread):
         if os.path.exists(output_file):
             return
 
+        width, height = self.get_video_dimensions(file_path)
+        if height:
+            scale = height / 1080.0
+            font_size = max(16, int(round(48 * scale)))
+            offset_large = max(20, int(round(85 * scale)))
+            offset_small = max(12, int(round(40 * scale)))
+        else:
+            font_size = 48
+            offset_large = 85
+            offset_small = 40
+
         ffmpeg_path = get_resource_path("ffmpeg")
         command = (
             f'{ffmpeg_path} -hide_banner -i "{file_path}" -vf '
             f'"drawtext='
-            f'text=\'%{{pts\\:localtime\\:{start_time_unix}\\:%X}}\': x=10: y=h-th-85: fontsize=48: fontcolor=white: shadowcolor=black: shadowx=2: shadowy=2, '
+            f'text=\'%{{pts\\:localtime\\:{start_time_unix}\\:%X}}\': x=10: y=h-th-{offset_large}: fontsize={font_size}: fontcolor=white: shadowcolor=black: shadowx=2: shadowy=2, '
             f'drawtext='
-            f'text=\'%{{pts\\:localtime\\:{start_time_unix}\\:{self.date_format}}}\': x=10: y=h-th-40: fontsize=48: fontcolor=white: shadowcolor=black: shadowx=2: shadowy=2'
+            f'text=\'%{{pts\\:localtime\\:{start_time_unix}\\:{self.date_format}}}\': x=10: y=h-th-{offset_small}: fontsize={font_size}: fontcolor=white: shadowcolor=black: shadowx=2: shadowy=2'
         )
         command += f'" -c:v {self.hwaccel_method} -b:v 5000k'
         if self.remove_audio:
@@ -99,6 +159,22 @@ class Worker(QThread):
         if result.stdout:
             print("Output:", result.stdout)
 
+    def get_video_dimensions(self, file_path):
+        ffmpeg_path = get_resource_path("ffmpeg")
+        result = subprocess.run(
+            [ffmpeg_path, "-hide_banner", "-i", file_path],
+            capture_output=True,
+            text=True,
+            creationflags=(subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0),
+        )
+        output = (result.stderr or "") + (result.stdout or "")
+        for line in output.splitlines():
+            if " Video: " in line and "x" in line:
+                match = re.search(r"\b(\d{2,5})x(\d{2,5})\b", line)
+                if match:
+                    return int(match.group(1)), int(match.group(2))
+        return 0, 0
+
     def process_videos(self, files, set_progress):
         set_progress(0)
 
@@ -108,10 +184,9 @@ class Worker(QThread):
         progress = 0
 
         for idx, file_path in enumerate(files, start=1):
-            creation_date = self.get_metadata_timestamp(file_path)
+            creation_date, tz_offset = self.get_metadata_timestamp(file_path)
             if creation_date:
-                creation_date = creation_date.split(': ', 1)[-1]  # Remove the 'Date/Time Original              :' part
-                start_time_unix = self.to_unix_timestamp(creation_date)
+                start_time_unix = self.to_unix_timestamp(creation_date, tz_offset=tz_offset)
                 dt = datetime.datetime.fromtimestamp(start_time_unix)  # Convert the Unix timestamp back to a datetime
                 output_file_name = f"{dt.strftime(self.date_format)}_{dt.strftime('%H-%M-%S')}.mp4"
                 output_file = os.path.join(self.output_folder_path, output_file_name)

@@ -18,6 +18,14 @@ def setup_menu_bar(window):
     window.delete_input_files_action.setChecked(window.settings.value('delete_input_files', False, type=bool))
     window.delete_input_files_action.triggered.connect(window.save_settings)
     window.settings_menu.addAction(window.delete_input_files_action)
+    window.experimental_menu = window.settings_menu.addMenu("Experimental")
+    window.timestamp_mp4_files_action = QAction("Timestamp Sony 4k MP4 Files", window)
+    window.timestamp_mp4_files_action.setCheckable(True)
+    window.timestamp_mp4_files_action.setChecked(
+        window.settings.value('timestamp_mp4_files_experimental', False, type=bool)
+    )
+    window.timestamp_mp4_files_action.triggered.connect(window.save_settings)
+    window.experimental_menu.addAction(window.timestamp_mp4_files_action)
     window.date_format_menu = window.settings_menu.addMenu("Date Format")
     window.date_format_group = QActionGroup(window)
     date_formats = [
@@ -40,7 +48,6 @@ def setup_menu_bar(window):
     window.manually_adjusted_for_dst_action = QAction("Sony DST Fix", window)
     window.manually_adjusted_for_dst_action.setCheckable(True)
     window.manually_adjusted_for_dst_action.triggered.connect(window.save_settings)
-    window.fixes_menu.addAction(window.manually_adjusted_for_dst_action)
     window.add_hour_action = QAction("Adjust timestamp +1 hour", window)
     window.add_hour_action.setCheckable(True)
     window.add_hour_action.setChecked(window.settings.value('add_hour', False, type=bool))
@@ -51,3 +58,4 @@ def setup_menu_bar(window):
     window.subtract_hour_action.setChecked(window.settings.value('subtract_hour', False, type=bool))
     window.subtract_hour_action.triggered.connect(window.save_settings)
     window.fixes_menu.addAction(window.subtract_hour_action)
+    window.fixes_menu.addAction(window.manually_adjusted_for_dst_action)

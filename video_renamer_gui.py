@@ -519,6 +519,8 @@ class MainWindow(QtWidgets.QMainWindow):
     progress_changed = QtCore.pyqtSignal(int)
     run_started = QtCore.pyqtSignal()
     run_finished = QtCore.pyqtSignal()
+    SENSITIVITY_THRESHOLDS = (65, 55, 45)  # Low, Medium, High sensitivity
+    SENSITIVITY_LABELS = ("Low", "Medium", "High")
 
     def __init__(self, initial_folder: str | None = None):
         super().__init__()
@@ -559,10 +561,9 @@ class MainWindow(QtWidgets.QMainWindow):
             default_model = str(bundled_model)
         self.model_edit = QtWidgets.QLineEdit(default_model)
 
-        self.conf_spin = QtWidgets.QSpinBox()
-        self.conf_spin.setRange(0, 100)
-        self.conf_spin.setSingleStep(5)
-        self.conf_spin.setValue(55)
+        self.sensitivity_combo = QtWidgets.QComboBox()
+        self.sensitivity_combo.addItems(list(self.SENSITIVITY_LABELS))
+        self.sensitivity_combo.setCurrentIndex(1)
 
         self.stride_spin = QtWidgets.QSpinBox()
         self.stride_spin.setRange(1, 10_000)
@@ -574,13 +575,13 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.extensions_edit = QtWidgets.QLineEdit("mp4,mov,mkv,avi,m4v")
 
-        self.ai_detection_check = QtWidgets.QCheckBox("Tag humans with AI")
+        self.ai_detection_check = QtWidgets.QCheckBox("Detect and Tag Humans")
         self.ai_detection_check.setChecked(True)
 
-        self.clip_numbers_check = QtWidgets.QCheckBox("Tag clip number")
+        self.clip_numbers_check = QtWidgets.QCheckBox("Label Clip Number")
         self.clip_numbers_check.setChecked(True)
 
-        self.lawmate_rename_check = QtWidgets.QCheckBox("Rename Lawmate Files")
+        self.lawmate_rename_check = QtWidgets.QCheckBox("Organize Lawmate Files")
 
         self.human_tag_combo = QtWidgets.QComboBox()
         self.human_tag_combo.addItems(["HUMAN", "CLAIMANT", "SUBJECT"])
@@ -608,19 +609,19 @@ class MainWindow(QtWidgets.QMainWindow):
         form.addRow("Folder", folder_row)
 
         form.addRow("", self.clip_numbers_check)
-        form.addRow("", self.ai_detection_check)
         form.addRow("", self.lawmate_rename_check)
+        form.addRow("", self.ai_detection_check)
+        sensitivity_row = QtWidgets.QHBoxLayout()
+        sensitivity_row.addStretch(1)
+        sensitivity_row.addWidget(QtWidgets.QLabel("Detection Sensitivity"))
+        sensitivity_row.addWidget(self.sensitivity_combo)
+        sensitivity_row.addStretch(1)
+        form.addRow("", sensitivity_row)
         human_tag_row = QtWidgets.QHBoxLayout()
-        human_tag_row.addWidget(QtWidgets.QLabel("Tag humans as:"))
+        human_tag_row.addWidget(QtWidgets.QLabel("Tag Human Clips As"))
         human_tag_row.addWidget(self.human_tag_combo)
         human_tag_row.addStretch(1)
         form.addRow("", human_tag_row)
-        ai_conf_row = QtWidgets.QHBoxLayout()
-        ai_conf_row.addStretch(1)
-        ai_conf_row.addWidget(QtWidgets.QLabel("AI Confidence %"))
-        ai_conf_row.addWidget(self.conf_spin)
-        ai_conf_row.addStretch(1)
-        form.addRow("", ai_conf_row)
         # Max integrity video length row hidden for now.
         # integrity_row = QtWidgets.QHBoxLayout()
         # integrity_row.addWidget(self.integrity_spin)
@@ -650,7 +651,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.clip_numbers_check.setChecked(settings.value("vrn/clip_numbers", True, type=bool))
         self.ai_detection_check.setChecked(settings.value("vrn/ai_detection", True, type=bool))
         self.lawmate_rename_check.setChecked(settings.value("vrn/lawmate_rename", False, type=bool))
-        self.conf_spin.setValue(settings.value("vrn/ai_confidence", 55, type=int))
+        saved_confidence = settings.value("vrn/ai_confidence", 55, type=int)
+        self.sensitivity_combo.setCurrentIndex(self._confidence_to_sensitivity_index(int(saved_confidence)))
         tag = settings.value("vrn/human_tag", "HUMAN")
         index = self.human_tag_combo.findText(str(tag).upper())
         if index >= 0:
@@ -661,15 +663,24 @@ class MainWindow(QtWidgets.QMainWindow):
         settings.setValue("vrn/clip_numbers", self.clip_numbers_check.isChecked())
         settings.setValue("vrn/ai_detection", self.ai_detection_check.isChecked())
         settings.setValue("vrn/lawmate_rename", self.lawmate_rename_check.isChecked())
-        settings.setValue("vrn/ai_confidence", self.conf_spin.value())
+        settings.setValue("vrn/ai_confidence", self._current_confidence_percent())
         settings.setValue("vrn/human_tag", self.human_tag_combo.currentText().strip().upper())
 
     def _wire_settings_saves(self):
         self.clip_numbers_check.toggled.connect(self._save_settings)
         self.ai_detection_check.toggled.connect(self._save_settings)
         self.lawmate_rename_check.toggled.connect(self._save_settings)
-        self.conf_spin.valueChanged.connect(self._save_settings)
+        self.sensitivity_combo.currentIndexChanged.connect(self._save_settings)
         self.human_tag_combo.currentIndexChanged.connect(self._save_settings)
+
+    def _current_confidence_percent(self) -> int:
+        return self.SENSITIVITY_THRESHOLDS[self.sensitivity_combo.currentIndex()]
+
+    def _confidence_to_sensitivity_index(self, confidence_percent: int) -> int:
+        return min(
+            range(len(self.SENSITIVITY_THRESHOLDS)),
+            key=lambda idx: abs(self.SENSITIVITY_THRESHOLDS[idx] - confidence_percent),
+        )
 
     def _choose_folder(self):
         path = QtWidgets.QFileDialog.getExistingDirectory(self, "Select Folder")
@@ -698,7 +709,7 @@ class MainWindow(QtWidgets.QMainWindow):
         cfg = TaggerConfig(
             folder=self.folder_path,
             model=self.model_edit.text().strip(),
-            conf=float(self.conf_spin.value()) / 100.0,
+            conf=float(self._current_confidence_percent()) / 100.0,
             frame_stride=int(self.stride_spin.value()),
             integrity_seconds=float(self.integrity_spin.value()),
             extensions=self.extensions_edit.text().strip(),
