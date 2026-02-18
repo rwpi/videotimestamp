@@ -51,10 +51,21 @@ class ImportThread(QThread):
             # Create the new folder
             folder_path.mkdir(parents=True, exist_ok=True)
 
-            allow_mp4_files = settings.value("timestamp_mp4_files_experimental", False, type=bool)
-
-            # Check for AVCHD .MTS files (and MP4 files if enabled) created today
+            # Check for AVCHD .MTS files, MP4 files, and LawMate MOV files created today
             files_to_copy = []
+            seen_files = set()
+
+            def append_if_on_target_date(file: Path):
+                if file.name.startswith("._"):
+                    return
+                if datetime.date.fromtimestamp(file.stat().st_ctime) != target_date:
+                    return
+                file_key = str(file.resolve())
+                if file_key in seen_files:
+                    return
+                seen_files.add(file_key)
+                files_to_copy.append(file)
+
             if os.name == 'nt':  # Windows
                 drives = [f"{chr(letter)}:\\" for letter in range(67, 91)]
             else:  # macOS
@@ -67,19 +78,19 @@ class ImportThread(QThread):
                         stream_path = drive_path / root / 'AVCHD' / 'BDMV' / 'STREAM'
                         if stream_path.is_dir():
                             for file in stream_path.glob('*.MTS'):
-                                if file.name.startswith("._"):
-                                    continue
-                                # If the file was created on the selected date, add it to the list of files to copy
-                                if datetime.date.fromtimestamp(file.stat().st_ctime) == target_date:
-                                    files_to_copy.append(file)
-                        if allow_mp4_files:
-                            mp4_path = drive_path / root / 'M4ROOT' / 'CLIP'
-                            if mp4_path.is_dir():
-                                for file in mp4_path.glob('*.MP4'):
-                                    if file.name.startswith("._"):
-                                        continue
-                                    if datetime.date.fromtimestamp(file.stat().st_ctime) == target_date:
-                                        files_to_copy.append(file)
+                                append_if_on_target_date(file)
+                        mp4_path = drive_path / root / 'M4ROOT' / 'CLIP'
+                        if mp4_path.is_dir():
+                            for file in mp4_path.glob('*.MP4'):
+                                append_if_on_target_date(file)
+                            for file in mp4_path.glob('*.mp4'):
+                                append_if_on_target_date(file)
+                    # Panasonic 4K and LawMate cards can place clips in day/media subfolders under DCIM.
+                    dcim_path = drive_path / 'DCIM'
+                    if dcim_path.is_dir():
+                        for file in dcim_path.rglob('*'):
+                            if file.is_file() and file.suffix.lower() in {'.mp4', '.mov'}:
+                                append_if_on_target_date(file)
 
             # Copy the files and emit progress signals
             total = len(files_to_copy)

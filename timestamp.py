@@ -2,6 +2,7 @@ import subprocess
 import os
 import datetime
 import re
+from pathlib import Path
 from PyQt5.QtCore import QThread, pyqtSignal
 import sys
 import stat
@@ -36,7 +37,20 @@ class Worker(QThread):
     progressDetail = pyqtSignal(int, int)
     finished = pyqtSignal()  
 
-    def __init__(self, files, output_folder_path, hwaccel_method, remove_audio, manually_adjusted_for_dst, add_hour, subtract_hour, date_format): 
+    def __init__(
+        self,
+        files,
+        output_folder_path,
+        hwaccel_method,
+        remove_audio,
+        manually_adjusted_for_dst,
+        add_hour,
+        subtract_hour,
+        date_format,
+        skip_panasonic_vx3_timestamp=False,
+        skip_lawmate_timestamp=False,
+        append_lawmate_covert_suffix=True,
+    ):
         super().__init__()
         self.files = files
         self.output_folder_path = output_folder_path
@@ -46,6 +60,9 @@ class Worker(QThread):
         self.add_hour = add_hour
         self.subtract_hour = subtract_hour
         self.date_format = date_format
+        self.skip_panasonic_vx3_timestamp = skip_panasonic_vx3_timestamp
+        self.skip_lawmate_timestamp = skip_lawmate_timestamp
+        self.append_lawmate_covert_suffix = append_lawmate_covert_suffix
 
     def run(self):
         self.process_videos(self.files, self.set_progress)
@@ -124,6 +141,45 @@ class Worker(QThread):
             dt = dt - datetime.timedelta(hours=1)  # Subtract an hour
         return int(dt.timestamp())
 
+    def get_camera_identity(self, file_path):
+        if sys.platform == "darwin" and getattr(sys, "frozen", False):
+            exiftool_path = os.path.join(sys._MEIPASS, 'exiftool', 'exiftool')
+        else:
+            exiftool_path = get_resource_path('exiftool')
+        result = subprocess.run(
+            [
+                exiftool_path,
+                '-s', '-s', '-s',
+                '-Make',
+                '-CameraModelName',
+                '-Model',
+                '-Format',
+                '-Information',
+                file_path,
+            ],
+            capture_output=True,
+            text=True,
+            creationflags=(subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0),
+        )
+        values = [line.strip() for line in (result.stdout or "").splitlines() if line.strip()]
+        return " ".join(values)
+
+    def is_lawmate_file(self, file_path, camera_identity):
+        identity_upper = camera_identity.upper()
+        if "NVT-IM" in identity_upper or "CARDV-TURNKEY" in identity_upper:
+            return True
+        if Path(file_path).suffix.lower() == ".mov" and Path(file_path).name.upper().startswith("RECO"):
+            return True
+        return False
+
+    def should_skip_timestamp_overlay(self, file_path, camera_identity):
+        identity_upper = camera_identity.upper()
+        if self.skip_panasonic_vx3_timestamp and "HC-VX3" in identity_upper:
+            return True
+        if self.skip_lawmate_timestamp and self.is_lawmate_file(file_path, camera_identity):
+            return True
+        return False
+
     def burn_timestamp(self, file_path, start_time_unix, output_file):
         if os.path.exists(output_file):
             return
@@ -147,7 +203,10 @@ class Worker(QThread):
             f'drawtext='
             f'text=\'%{{pts\\:localtime\\:{start_time_unix}\\:{self.date_format}}}\': x=10: y=h-th-{offset_small}: fontsize={font_size}: fontcolor=white: shadowcolor=black: shadowx=2: shadowy=2'
         )
-        command += f'" -c:v {self.hwaccel_method} -b:v 5000k'
+        source_bitrate_kbps = self.get_video_bitrate_kbps(file_path)
+        command += f'" -c:v {self.hwaccel_method}'
+        if source_bitrate_kbps:
+            command += f' -b:v {source_bitrate_kbps}k'
         if self.remove_audio:
             command += ' -an'
         else:
@@ -158,6 +217,45 @@ class Worker(QThread):
             print("Error:", result.stderr)
         if result.stdout:
             print("Output:", result.stdout)
+
+    def transcode_without_timestamp(self, file_path, output_file):
+        if os.path.exists(output_file):
+            return
+        ffmpeg_path = get_resource_path("ffmpeg")
+        command = f'{ffmpeg_path} -hide_banner -i "{file_path}" -map 0:v:0 -c:v copy'
+        if self.remove_audio:
+            command += ' -an'
+        else:
+            command += ' -map 0:a:0? -c:a copy'
+        command += f' "{output_file}"'
+        result = subprocess.run(
+            command,
+            shell=True,
+            capture_output=True,
+            text=True,
+            creationflags=(subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0),
+        )
+        if result.stderr:
+            print("Error:", result.stderr)
+        if result.stdout:
+            print("Output:", result.stdout)
+
+    def get_video_bitrate_kbps(self, file_path):
+        ffmpeg_path = get_resource_path("ffmpeg")
+        result = subprocess.run(
+            [ffmpeg_path, "-hide_banner", "-i", file_path],
+            capture_output=True,
+            text=True,
+            creationflags=(subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0),
+        )
+        output = (result.stderr or "") + (result.stdout or "")
+        match = re.search(r"bitrate:\s*([0-9]+(?:\.[0-9]+)?)\s*kb/s", output, flags=re.IGNORECASE)
+        if not match:
+            return None
+        try:
+            return int(float(match.group(1)))
+        except ValueError:
+            return None
 
     def get_video_dimensions(self, file_path):
         ffmpeg_path = get_resource_path("ffmpeg")
@@ -188,9 +286,18 @@ class Worker(QThread):
             if creation_date:
                 start_time_unix = self.to_unix_timestamp(creation_date, tz_offset=tz_offset)
                 dt = datetime.datetime.fromtimestamp(start_time_unix)  # Convert the Unix timestamp back to a datetime
-                output_file_name = f"{dt.strftime(self.date_format)}_{dt.strftime('%H-%M-%S')}.mp4"
+                camera_identity = self.get_camera_identity(file_path)
+                lawmate_suffix = ""
+                if self.append_lawmate_covert_suffix and self.is_lawmate_file(file_path, camera_identity):
+                    lawmate_suffix = "_COVERT"
+                output_file_name = (
+                    f"{dt.strftime(self.date_format)}_{dt.strftime('%H-%M-%S')}{lawmate_suffix}.mp4"
+                )
                 output_file = os.path.join(self.output_folder_path, output_file_name)
-                self.burn_timestamp(file_path, start_time_unix, output_file)
+                if self.should_skip_timestamp_overlay(file_path, camera_identity):
+                    self.transcode_without_timestamp(file_path, output_file)
+                else:
+                    self.burn_timestamp(file_path, start_time_unix, output_file)
 
             progress += increment
             set_progress(int(progress))

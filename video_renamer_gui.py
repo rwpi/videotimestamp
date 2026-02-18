@@ -56,7 +56,7 @@ def strip_existing_prefix_and_tags(stem: str) -> str:
     """
     s = re.sub(r"^CLIP\d+_", "", stem, flags=re.IGNORECASE)
     # Strip one or more trailing tags to avoid double-append when re-running.
-    s = re.sub(r"(_(INTEGRITY|CLAIMANT|HUMAN|UNKNOWN|PERSON|SUBJECT|COVERT))+$", "", s, flags=re.IGNORECASE)
+    s = re.sub(r"(_(INTEGRITY|CLAIMANT|HUMAN|UNKNOWN|PERSON|SUBJECT))+$", "", s, flags=re.IGNORECASE)
     return s
 
 
@@ -198,6 +198,18 @@ def parse_clip_datetime(value: str, preferred_order: str | None = None) -> datet
     return None
 
 
+def is_vts_processed_stem(stem: str) -> bool:
+    stem = re.sub(r"^CLIP\d+_", "", stem, flags=re.IGNORECASE)
+    match = re.match(
+        r"^((?:\d{2}|[A-Za-z]{3})-(?:\d{2}|[A-Za-z]{3})-\d{4}_\d{2}-\d{2}-\d{2})(?:_.*)?$",
+        stem,
+        flags=re.IGNORECASE,
+    )
+    if not match:
+        return False
+    return parse_clip_datetime(match.group(1), preferred_order=preferred_date_order_from_settings()) is not None
+
+
 def parse_exif_datetime(value: str) -> datetime.datetime | None:
     value = value.strip()
     if not value:
@@ -242,6 +254,41 @@ def get_lawmate_exif_datetime(video_path: Path) -> datetime.datetime | None:
     return None
 
 
+def is_lawmate_file(video_path: Path) -> bool:
+    # Fast path for common LawMate naming on SD cards.
+    if video_path.suffix.lower() == ".mov" and re.match(r"^RECO\d+$", video_path.stem, flags=re.IGNORECASE):
+        return True
+
+    # Metadata check is required to avoid tagging regular camcorder MP4 files as LawMate.
+    if sys.platform == "darwin" and getattr(sys, "frozen", False):
+        exiftool_path = str(Path(sys._MEIPASS) / "exiftool" / "exiftool")
+    else:
+        exiftool_path = get_resource_path("exiftool")
+    result = subprocess.run(
+        [
+            exiftool_path,
+            "-s",
+            "-s",
+            "-s",
+            "-Make",
+            "-CameraModelName",
+            "-Model",
+            "-Format",
+            "-Information",
+            str(video_path),
+        ],
+        capture_output=True,
+        text=True,
+        creationflags=(subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0),
+    )
+    identity = " ".join(
+        line.strip() for line in (result.stdout or "").splitlines() if line.strip()
+    ).upper()
+    if "NVT-IM" in identity or "CARDV-TURNKEY" in identity:
+        return True
+    return False
+
+
 def lawmate_rename(
     videos: list[Path],
     date_format: str,
@@ -252,7 +299,7 @@ def lawmate_rename(
     log,
 ) -> None:
     for vp in videos:
-        if vp.suffix.lower() != ".mov":
+        if vp.suffix.lower() not in {".mov", ".mp4"}:
             continue
         dt = get_lawmate_exif_datetime(vp)
         if not dt:
@@ -269,6 +316,8 @@ def lawmate_rename(
         date_label = dt.strftime(date_format)
         time_label = dt.strftime("%H-%M-%S")
         tag_suffix = extract_trailing_tags(vp.stem)
+        if "_COVERT" not in tag_suffix.upper():
+            tag_suffix = f"{tag_suffix}_COVERT"
         dst = vp.with_name(f"{date_label}_{time_label}{tag_suffix}{vp.suffix}")
         if vp.name == dst.name:
             log(f"Lawmate: OK {vp.name}")
@@ -276,7 +325,7 @@ def lawmate_rename(
         safe_rename(vp, dst, dry_run=dry_run, log=log)
 
 
-def cliporder_rename(directory: Path, dry_run: bool, log) -> None:
+def cliporder_rename(directory: Path, dry_run: bool, log, only_vts_outputs: bool = False) -> None:
     """
     Same approach as your module:
     - looks for MM-DD-YYYY_HH-MM-SS, DD-MM-YYYY_HH-MM-SS, or Mon-DD-YYYY_HH-MM-SS anywhere in filename
@@ -291,6 +340,8 @@ def cliporder_rename(directory: Path, dry_run: bool, log) -> None:
 
     for p in directory.iterdir():
         if not p.is_file():
+            continue
+        if only_vts_outputs and not is_vts_processed_stem(p.stem):
             continue
         m = pattern.search(p.name)
         if not m:
@@ -365,6 +416,7 @@ class TaggerConfig:
     use_ai_detection: bool
     human_tag: str
     rename_lawmate_files: bool
+    only_vts_outputs: bool
 
 
 class VideoTaggerWorker(QtCore.QObject):
@@ -405,10 +457,6 @@ class VideoTaggerWorker(QtCore.QObject):
         exts = {("." + e.strip().lower().lstrip(".")) for e in cfg.extensions.split(",") if e.strip()}
         videos = sorted([p for p in folder.iterdir() if p.is_file() and p.suffix.lower() in exts])
 
-        if not videos:
-            self.log.emit("No videos found.")
-            return
-
         if cfg.rename_lawmate_files:
             settings = QSettings("VideoTimestamp", "VTS")
             date_format = settings.value("date_format", "%m-%d-%Y")
@@ -417,10 +465,25 @@ class VideoTaggerWorker(QtCore.QObject):
             manually_adjusted_for_dst = settings.value("manually_adjusted_for_dst", False, type=bool)
             add_hour = settings.value("add_hour", False, type=bool)
             subtract_hour = settings.value("subtract_hour", False, type=bool)
-            self.log.emit("Renaming Lawmate files from EXIF timestamps...")
+            self.log.emit("Organizing detected unprocessed LawMate files from metadata timestamps...")
+            lawmate_candidates = [
+                p for p in videos
+                if p.suffix.lower() in {".mov", ".mp4"}
+                and not is_vts_processed_stem(p.stem)
+                and is_lawmate_file(p)
+            ]
+            non_lawmate_skipped = len([
+                p for p in videos
+                if p.suffix.lower() in {".mov", ".mp4"}
+                and not is_vts_processed_stem(p.stem)
+            ]) - len(lawmate_candidates)
+            if non_lawmate_skipped > 0:
+                self.log.emit(
+                    f"Skipped {non_lawmate_skipped} non-LawMate raw MOV/MP4 file(s)."
+                )
             try:
                 lawmate_rename(
-                    videos=videos,
+                    videos=lawmate_candidates,
                     date_format=date_format,
                     manually_adjusted_for_dst=manually_adjusted_for_dst,
                     add_hour=add_hour,
@@ -432,6 +495,20 @@ class VideoTaggerWorker(QtCore.QObject):
                 self.log.emit(f"Warning: Lawmate rename failed ({exc}).")
             if not cfg.dry_run:
                 videos = sorted([p for p in folder.iterdir() if p.is_file() and p.suffix.lower() in exts])
+
+        total_videos_found = len(videos)
+        if cfg.only_vts_outputs:
+            videos = [p for p in videos if is_vts_processed_stem(p.stem)]
+            skipped = total_videos_found - len(videos)
+            if skipped > 0:
+                self.log.emit(f"Skipped {skipped} unprocessed original file(s).")
+
+        if not videos:
+            if cfg.only_vts_outputs:
+                self.log.emit("No eligible processed videos found after excluding unprocessed originals.")
+            else:
+                self.log.emit("No videos found.")
+            return
 
         yolo_model = None
         if cfg.use_ai_detection:
@@ -462,6 +539,10 @@ class VideoTaggerWorker(QtCore.QObject):
                     raise Cancelled()
 
                 self.log.emit(f"Analyzing file {i}/{total}")
+                if vp.stem.upper().endswith("_COVERT"):
+                    self.log.emit(f"Preserving covert tag: {vp.name}")
+                    self.progress.emit(i, total)
+                    continue
                 stem_clean = strip_existing_prefix_and_tags(vp.stem)
                 duration = get_duration_seconds(vp)
 
@@ -495,7 +576,12 @@ class VideoTaggerWorker(QtCore.QObject):
 
         if cfg.use_clip_numbers:
             self.log.emit("Applying CLIP# ordering...")
-            cliporder_rename(folder, dry_run=cfg.dry_run, log=self.log.emit)
+            cliporder_rename(
+                folder,
+                dry_run=cfg.dry_run,
+                log=self.log.emit,
+                only_vts_outputs=cfg.only_vts_outputs,
+            )
 
         if not cfg.dry_run:
             human_seconds, covert_seconds, human_files, covert_files, unknown_durations = summarize_totals(
@@ -581,8 +667,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.clip_numbers_check = QtWidgets.QCheckBox("Label Clip Number")
         self.clip_numbers_check.setChecked(True)
 
-        self.lawmate_rename_check = QtWidgets.QCheckBox("Organize Lawmate Files")
-
         self.human_tag_combo = QtWidgets.QComboBox()
         self.human_tag_combo.addItems(["HUMAN", "CLAIMANT", "SUBJECT"])
 
@@ -609,7 +693,6 @@ class MainWindow(QtWidgets.QMainWindow):
         form.addRow("Folder", folder_row)
 
         form.addRow("", self.clip_numbers_check)
-        form.addRow("", self.lawmate_rename_check)
         form.addRow("", self.ai_detection_check)
         sensitivity_row = QtWidgets.QHBoxLayout()
         sensitivity_row.addStretch(1)
@@ -650,7 +733,6 @@ class MainWindow(QtWidgets.QMainWindow):
         settings = self._settings()
         self.clip_numbers_check.setChecked(settings.value("vrn/clip_numbers", True, type=bool))
         self.ai_detection_check.setChecked(settings.value("vrn/ai_detection", True, type=bool))
-        self.lawmate_rename_check.setChecked(settings.value("vrn/lawmate_rename", False, type=bool))
         saved_confidence = settings.value("vrn/ai_confidence", 55, type=int)
         self.sensitivity_combo.setCurrentIndex(self._confidence_to_sensitivity_index(int(saved_confidence)))
         tag = settings.value("vrn/human_tag", "HUMAN")
@@ -662,14 +744,12 @@ class MainWindow(QtWidgets.QMainWindow):
         settings = self._settings()
         settings.setValue("vrn/clip_numbers", self.clip_numbers_check.isChecked())
         settings.setValue("vrn/ai_detection", self.ai_detection_check.isChecked())
-        settings.setValue("vrn/lawmate_rename", self.lawmate_rename_check.isChecked())
         settings.setValue("vrn/ai_confidence", self._current_confidence_percent())
         settings.setValue("vrn/human_tag", self.human_tag_combo.currentText().strip().upper())
 
     def _wire_settings_saves(self):
         self.clip_numbers_check.toggled.connect(self._save_settings)
         self.ai_detection_check.toggled.connect(self._save_settings)
-        self.lawmate_rename_check.toggled.connect(self._save_settings)
         self.sensitivity_combo.currentIndexChanged.connect(self._save_settings)
         self.human_tag_combo.currentIndexChanged.connect(self._save_settings)
 
@@ -717,7 +797,8 @@ class MainWindow(QtWidgets.QMainWindow):
             use_clip_numbers=self.clip_numbers_check.isChecked(),
             use_ai_detection=self.ai_detection_check.isChecked(),
             human_tag=self.human_tag_combo.currentText().strip().upper() or "HUMAN",
-            rename_lawmate_files=self.lawmate_rename_check.isChecked(),
+            rename_lawmate_files=True,
+            only_vts_outputs=True,
         )
 
         self.progress_bar.setValue(0)

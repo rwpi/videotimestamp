@@ -26,6 +26,8 @@ from check_for_updates import check_for_updates
 from menubar import setup_menu_bar
 from ui_setup import setup_ui
 import showsdcard
+if os.name == "nt":
+    import ctypes
 
 class ImportDialog(QDialog):
     def __init__(self, parent=None):
@@ -148,10 +150,16 @@ class ImportDialog(QDialog):
                 stream_path = drive_path / root / "AVCHD" / "BDMV" / "STREAM"
                 if stream_path.is_dir():
                     return True
+            dcim_path = drive_path / "DCIM"
+            if dcim_path.is_dir():
+                for clip in dcim_path.rglob("*"):
+                    if clip.is_file() and clip.suffix.lower() in {".mts", ".mp4", ".mov"}:
+                        return True
         return False
 
     def _open_sd_card_mts(self, _link):
-        showsdcard.show_sd_card()
+        selected_date = self.date_edit.date().toPyDate()
+        showsdcard.show_sd_card_for_date(selected_date)
 
     def get_values(self):
         selected_date = self.date_edit.date().toPyDate()
@@ -253,8 +261,7 @@ class MainWindow(QMainWindow):
             self.check_if_ready_to_process()
 
     def choose_input_files(self):
-        allow_mp4_files = self.settings.value('timestamp_mp4_files_experimental', False, type=bool)
-        file_filter = 'Video Files (*.MTS *.mts *.MP4 *.mp4)' if allow_mp4_files else 'MTS Files (*.MTS *.mts)'
+        file_filter = 'Video Files (*.MTS *.mts *.MP4 *.mp4 *.MOV *.mov)'
         new_input_files, _ = QFileDialog.getOpenFileNames(
             self,
             'Select video files',
@@ -296,10 +303,17 @@ class MainWindow(QMainWindow):
         self.settings.setValue('manually_adjusted_for_dst', self.manually_adjusted_for_dst_action.isChecked())
         self.settings.setValue('add_hour', self.add_hour_action.isChecked())
         self.settings.setValue('subtract_hour', self.subtract_hour_action.isChecked())
-        self.settings.setValue('delete_input_files', self.delete_input_files_action.isChecked())
         self.settings.setValue(
-            'timestamp_mp4_files_experimental',
-            self.timestamp_mp4_files_action.isChecked(),
+            'skip_panasonic_vx3_timestamp',
+            self.skip_panasonic_vx3_timestamp_action.isChecked(),
+        )
+        self.settings.setValue(
+            'skip_lawmate_timestamp',
+            self.skip_lawmate_timestamp_action.isChecked(),
+        )
+        self.settings.setValue(
+            'append_lawmate_covert_suffix',
+            self.append_lawmate_covert_suffix_action.isChecked(),
         )
         if hasattr(self, "date_format_group"):
             selected = self.date_format_group.checkedAction()
@@ -311,13 +325,27 @@ class MainWindow(QMainWindow):
         self.status_label.setText("Timestamping Complete")
         self.progress_bar.setValue(100)
         self.process_button.setEnabled(True)
-        if self.settings.value('delete_input_files', False, type=bool):
-            delete_files(self._files_within_output_folder(self.input_files))
+        delete_files(self._files_within_output_folder(self.input_files))
         self.rename_button.setFocus()
 
     def open_folder(self):
         if self.output_folder_path:
             QDesktopServices.openUrl(QUrl.fromLocalFile(self.output_folder_path))
+
+    def _is_local_cleanup_path(self, path: Path) -> bool:
+        if os.name == "nt":
+            drive = path.drive
+            if not drive:
+                return False
+            root = f"{drive}\\"
+            # 3 = DRIVE_FIXED. Reject removable/network/unknown drives.
+            return ctypes.windll.kernel32.GetDriveTypeW(root) == 3
+
+        # On macOS, removable/external volumes are mounted under /Volumes.
+        # Treat those as non-local cleanup targets.
+        if path.is_absolute() and len(path.parts) >= 2 and path.parts[1] == "Volumes":
+            return False
+        return True
 
     def _files_within_output_folder(self, paths):
         if not self.output_folder_path:
@@ -329,6 +357,8 @@ class MainWindow(QMainWindow):
                 resolved = Path(path).expanduser().resolve()
                 resolved.relative_to(output_root)
             except Exception:
+                continue
+            if not self._is_local_cleanup_path(resolved):
                 continue
             safe_paths.append(str(resolved))
         return safe_paths
@@ -368,7 +398,28 @@ class MainWindow(QMainWindow):
             add_hour = self.settings.value('add_hour', False, type=bool)
             subtract_hour = self.settings.value('subtract_hour', False, type=bool)
             date_format = self.settings.value('date_format', "%m-%d-%Y")
-            self.worker = Worker(self.input_files, self.output_folder_path, hwaccel_method, remove_audio, manually_adjusted_for_dst, add_hour, subtract_hour, date_format)
+            skip_panasonic_vx3_timestamp = self.settings.value(
+                'skip_panasonic_vx3_timestamp', False, type=bool
+            )
+            skip_lawmate_timestamp = self.settings.value(
+                'skip_lawmate_timestamp', True, type=bool
+            )
+            append_lawmate_covert_suffix = self.settings.value(
+                'append_lawmate_covert_suffix', True, type=bool
+            )
+            self.worker = Worker(
+                self.input_files,
+                self.output_folder_path,
+                hwaccel_method,
+                remove_audio,
+                manually_adjusted_for_dst,
+                add_hour,
+                subtract_hour,
+                date_format,
+                skip_panasonic_vx3_timestamp,
+                skip_lawmate_timestamp,
+                append_lawmate_covert_suffix,
+            )
             total_files = len(self.input_files)
             if total_files > 0:
                 self.status_label.setText("Timestamping Files")
