@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import cv2
-from PyQt5 import QtCore, QtGui, QtWidgets
+from PyQt5 import QtCore, QtWidgets
 from PyQt5.QtCore import QSettings
 
 from timestamp import get_resource_path
@@ -67,6 +67,14 @@ def extract_trailing_tags(stem: str) -> str:
         flags=re.IGNORECASE,
     )
     return match.group(1) if match else ""
+
+
+def has_existing_classification_tag(stem: str) -> bool:
+    stem_upper = stem.upper()
+    return any(
+        stem_upper.endswith(f"_{tag}")
+        for tag in ("INTEGRITY", "CLAIMANT", "HUMAN", "UNKNOWN", "PERSON", "SUBJECT")
+    )
 
 
 def get_duration_seconds(video_path: Path) -> float | None:
@@ -403,6 +411,33 @@ def summarize_totals(folder: Path, exts: set[str], human_tag: str) -> tuple[floa
     return human_seconds, covert_seconds, human_files, covert_files, unknown_durations
 
 
+def build_duration_summary_message(
+    folder: Path,
+    exts: set[str],
+    human_tag: str,
+    prefix: str = "",
+) -> str:
+    human_seconds, covert_seconds, human_files, covert_files, unknown_durations = summarize_totals(
+        folder, exts, human_tag
+    )
+    human_minutes = human_seconds / 60.0
+    tag_label = human_tag.lower()
+
+    if prefix:
+        message = f"{prefix} {human_minutes:.2f} minutes of {tag_label} video"
+    else:
+        message = f"{human_minutes:.2f} minutes of {tag_label} video"
+
+    if covert_files:
+        covert_minutes = covert_seconds / 60.0
+        message += f", {covert_minutes:.2f} minutes of covert video"
+    if unknown_durations:
+        message += f". {unknown_durations} file(s) had unknown duration"
+    if human_files == 0 and covert_files == 0 and unknown_durations == 0:
+        message += f". No tagged {tag_label}/covert files found"
+    return message
+
+
 @dataclass
 class TaggerConfig:
     folder: Path
@@ -414,6 +449,7 @@ class TaggerConfig:
     dry_run: bool
     use_clip_numbers: bool
     use_ai_detection: bool
+    respect_existing_tags: bool
     human_tag: str
     rename_lawmate_files: bool
     only_vts_outputs: bool
@@ -539,6 +575,10 @@ class VideoTaggerWorker(QtCore.QObject):
                     raise Cancelled()
 
                 self.log.emit(f"Analyzing file {i}/{total}")
+                if cfg.respect_existing_tags and has_existing_classification_tag(vp.stem):
+                    self.log.emit(f"Respecting existing tag: {vp.name}")
+                    self.progress.emit(i, total)
+                    continue
                 if vp.stem.upper().endswith("_COVERT"):
                     self.log.emit(f"Preserving covert tag: {vp.name}")
                     self.progress.emit(i, total)
@@ -584,23 +624,12 @@ class VideoTaggerWorker(QtCore.QObject):
             )
 
         if not cfg.dry_run:
-            human_seconds, covert_seconds, human_files, covert_files, unknown_durations = summarize_totals(
-                folder, exts, cfg.human_tag
-            )
-            human_minutes = human_seconds / 60.0
-            tag_label = cfg.human_tag.lower()
-            message = f"Renaming complete! {human_minutes:.2f} minutes of {tag_label} video"
-            if covert_files:
-                covert_minutes = covert_seconds / 60.0
-                message += f", {covert_minutes:.2f} minutes of covert video"
-            if unknown_durations:
-                message += f". {unknown_durations} file(s) had unknown duration"
-            self.log.emit(message)
+            self.log.emit("Renaming complete.")
         else:
             self.log.emit("Dry run complete. No files were renamed.")
 
 
-class MainWindow(QtWidgets.QMainWindow):
+class MainWindow(QtWidgets.QWidget):
     status_changed = QtCore.pyqtSignal(str)
     progress_changed = QtCore.pyqtSignal(int)
     run_started = QtCore.pyqtSignal()
@@ -615,31 +644,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self._worker = None
         self.folder_path = None
 
-        central = QtWidgets.QWidget()
-        self.setCentralWidget(central)
-
         self.folder_label = QtWidgets.QLabel("No folder selected")
         self.folder_label.setAlignment(QtCore.Qt.AlignCenter)
         self.folder_label.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
         self.folder_btn = QtWidgets.QPushButton("Browse...")
         if initial_folder:
             self._set_folder_path(initial_folder)
-
-        self.logo_label = QtWidgets.QLabel()
-        self.logo_label.setAlignment(QtCore.Qt.AlignCenter)
-        logo_path = Path(__file__).with_name("VRN.png")
-        if logo_path.exists():
-            reader = QtGui.QImageReader(str(logo_path))
-            reader.setAutoTransform(True)
-            size = reader.size()
-            target_h = 220
-            if size.isValid() and size.height() > 0:
-                target_w = int(size.width() * (target_h / size.height()))
-                if target_w > 0:
-                    reader.setScaledSize(QtCore.QSize(target_w, target_h))
-            image = reader.read()
-            if not image.isNull():
-                self.logo_label.setPixmap(QtGui.QPixmap.fromImage(image))
 
         default_model = "yolov8n.pt"
         bundled_model = Path(__file__).with_name(default_model)
@@ -664,13 +674,16 @@ class MainWindow(QtWidgets.QMainWindow):
         self.ai_detection_check = QtWidgets.QCheckBox("Detect and Tag Humans")
         self.ai_detection_check.setChecked(True)
 
+        self.respect_existing_tags_check = QtWidgets.QCheckBox("Respect Existing Tags")
+        self.respect_existing_tags_check.setChecked(True)
+
         self.clip_numbers_check = QtWidgets.QCheckBox("Label Clip Number")
         self.clip_numbers_check.setChecked(True)
 
         self.human_tag_combo = QtWidgets.QComboBox()
         self.human_tag_combo.addItems(["HUMAN", "CLAIMANT", "SUBJECT"])
 
-        self.run_btn = QtWidgets.QPushButton("Run")
+        self.run_btn = QtWidgets.QPushButton("Rename Files")
 
         self.progress_bar = QtWidgets.QProgressBar()
         self.progress_bar.setRange(0, 100)
@@ -694,6 +707,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         form.addRow("", self.clip_numbers_check)
         form.addRow("", self.ai_detection_check)
+        form.addRow("", self.respect_existing_tags_check)
         sensitivity_row = QtWidgets.QHBoxLayout()
         sensitivity_row.addStretch(1)
         sensitivity_row.addWidget(QtWidgets.QLabel("Detection Sensitivity"))
@@ -715,14 +729,14 @@ class MainWindow(QtWidgets.QMainWindow):
         button_row = QtWidgets.QHBoxLayout()
         button_row.addWidget(self.run_btn)
 
-        layout = QtWidgets.QVBoxLayout(central)
-        layout.addWidget(self.logo_label)
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.addStretch(1)
         layout.addLayout(form)
         layout.addLayout(button_row)
-        # Status/progress shown in main window now.
+        layout.addStretch(1)
 
         self.folder_btn.clicked.connect(self._choose_folder)
-        self.run_btn.clicked.connect(self._start)
+        self.run_btn.clicked.connect(self._handle_run_button)
         self._load_settings()
         self._wire_settings_saves()
 
@@ -733,6 +747,9 @@ class MainWindow(QtWidgets.QMainWindow):
         settings = self._settings()
         self.clip_numbers_check.setChecked(settings.value("vrn/clip_numbers", True, type=bool))
         self.ai_detection_check.setChecked(settings.value("vrn/ai_detection", True, type=bool))
+        self.respect_existing_tags_check.setChecked(
+            settings.value("vrn/respect_existing_tags", True, type=bool)
+        )
         saved_confidence = settings.value("vrn/ai_confidence", 55, type=int)
         self.sensitivity_combo.setCurrentIndex(self._confidence_to_sensitivity_index(int(saved_confidence)))
         tag = settings.value("vrn/human_tag", "HUMAN")
@@ -744,12 +761,14 @@ class MainWindow(QtWidgets.QMainWindow):
         settings = self._settings()
         settings.setValue("vrn/clip_numbers", self.clip_numbers_check.isChecked())
         settings.setValue("vrn/ai_detection", self.ai_detection_check.isChecked())
+        settings.setValue("vrn/respect_existing_tags", self.respect_existing_tags_check.isChecked())
         settings.setValue("vrn/ai_confidence", self._current_confidence_percent())
         settings.setValue("vrn/human_tag", self.human_tag_combo.currentText().strip().upper())
 
     def _wire_settings_saves(self):
         self.clip_numbers_check.toggled.connect(self._save_settings)
         self.ai_detection_check.toggled.connect(self._save_settings)
+        self.respect_existing_tags_check.toggled.connect(self._save_settings)
         self.sensitivity_combo.currentIndexChanged.connect(self._save_settings)
         self.human_tag_combo.currentIndexChanged.connect(self._save_settings)
 
@@ -778,8 +797,23 @@ class MainWindow(QtWidgets.QMainWindow):
         self.folder_label.setText(resolved.name)
 
     def _set_running(self, running: bool):
-        self.run_btn.setEnabled(not running)
+        self.run_btn.setText("Cancel" if running else "Rename Files")
+        self.run_btn.setEnabled(True)
         self.folder_btn.setEnabled(not running)
+
+    def _handle_run_button(self):
+        if self._worker is not None:
+            self._cancel()
+        else:
+            self._start()
+
+    def _cancel(self):
+        if self._worker is None:
+            return
+        self._append_log("Cancelling...")
+        self.run_btn.setText("Cancelling...")
+        self.run_btn.setEnabled(False)
+        self._worker.stop()
 
     def _start(self):
         if not self.folder_path:
@@ -796,6 +830,7 @@ class MainWindow(QtWidgets.QMainWindow):
             dry_run=False,
             use_clip_numbers=self.clip_numbers_check.isChecked(),
             use_ai_detection=self.ai_detection_check.isChecked(),
+            respect_existing_tags=self.respect_existing_tags_check.isChecked(),
             human_tag=self.human_tag_combo.currentText().strip().upper() or "HUMAN",
             rename_lawmate_files=True,
             only_vts_outputs=True,
@@ -807,7 +842,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.progress_changed.emit(0)
         self.run_started.emit()
         self._set_running(True)
-        self.hide()
 
         self._thread = QtCore.QThread()
         self._worker = VideoTaggerWorker(cfg)
@@ -841,6 +875,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._append_log(f"Error: {text}")
 
     def _on_worker_finished(self):
+        self._worker = None
+        self._thread = None
         self._set_running(False)
         self.run_finished.emit()
 

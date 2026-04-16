@@ -6,6 +6,7 @@ from pathlib import Path
 from PyQt5.QtCore import QThread, pyqtSignal
 import sys
 import stat
+import signal
 
 def get_resource_path(relative_path):
     """ Get absolute path to resource, works for dev and for PyInstaller """
@@ -63,17 +64,61 @@ class Worker(QThread):
         self.skip_panasonic_vx3_timestamp = skip_panasonic_vx3_timestamp
         self.skip_lawmate_timestamp = skip_lawmate_timestamp
         self.append_lawmate_covert_suffix = append_lawmate_covert_suffix
+        self.was_cancelled = False
+        self._stop_requested = False
+        self._current_process = None
+
+    def stop(self):
+        self._stop_requested = True
+        self._terminate_current_process()
+
+    def _should_stop(self):
+        return self._stop_requested
+
+    def _terminate_current_process(self):
+        process = self._current_process
+        if process is None or process.poll() is not None:
+            return
+        try:
+            if sys.platform != "win32":
+                os.killpg(os.getpgid(process.pid), signal.SIGTERM)
+            else:
+                process.terminate()
+        except Exception:
+            try:
+                process.kill()
+            except Exception:
+                pass
 
     def run(self):
         self.process_videos(self.files, self.set_progress)
         self.finished.emit()
+
+    def _run_command(self, command, *, shell=False):
+        if self._should_stop():
+            return None
+        kwargs = {
+            "stdout": subprocess.PIPE,
+            "stderr": subprocess.PIPE,
+            "text": True,
+            "creationflags": (subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0),
+        }
+        if sys.platform != "win32":
+            kwargs["start_new_session"] = True
+        process = subprocess.Popen(command, shell=shell, **kwargs)
+        self._current_process = process
+        try:
+            stdout, stderr = process.communicate()
+        finally:
+            self._current_process = None
+        return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
 
     def get_metadata_timestamp(self, file_path):
         if sys.platform == "darwin" and getattr(sys, "frozen", False):  # If the host machine is macOS
             exiftool_path = os.path.join(sys._MEIPASS, 'exiftool', 'exiftool') # Use the bundled exiftool
         else:
             exiftool_path = get_resource_path('exiftool')
-        result = subprocess.run(
+        result = self._run_command(
             [
                 exiftool_path,
                 '-s', '-s', '-s',
@@ -87,10 +132,9 @@ class Worker(QThread):
                 '-TimeZone',
                 file_path,
             ],
-            capture_output=True,
-            text=True,
-            creationflags=(subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0),
         )
+        if result is None:
+            return "", tz_offset
         if result.stderr:
             print("Error:", result.stderr)
         if result.stdout:
@@ -146,7 +190,7 @@ class Worker(QThread):
             exiftool_path = os.path.join(sys._MEIPASS, 'exiftool', 'exiftool')
         else:
             exiftool_path = get_resource_path('exiftool')
-        result = subprocess.run(
+        result = self._run_command(
             [
                 exiftool_path,
                 '-s', '-s', '-s',
@@ -157,10 +201,9 @@ class Worker(QThread):
                 '-Information',
                 file_path,
             ],
-            capture_output=True,
-            text=True,
-            creationflags=(subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0),
         )
+        if result is None:
+            return ""
         values = [line.strip() for line in (result.stdout or "").splitlines() if line.strip()]
         return " ".join(values)
 
@@ -212,7 +255,9 @@ class Worker(QThread):
         else:
             command += ' -map 0:v:0 -map 0:a:0? -c:a aac -b:a 192k -ac 2'
         command += f' "{output_file}"'
-        result = subprocess.run(command, shell=True, capture_output=True, text=True, creationflags=(subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0))
+        result = self._run_command(command, shell=True)
+        if result is None:
+            return
         if result.stderr:
             print("Error:", result.stderr)
         if result.stdout:
@@ -228,13 +273,12 @@ class Worker(QThread):
         else:
             command += ' -map 0:a:0? -c:a copy'
         command += f' "{output_file}"'
-        result = subprocess.run(
+        result = self._run_command(
             command,
             shell=True,
-            capture_output=True,
-            text=True,
-            creationflags=(subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0),
         )
+        if result is None:
+            return
         if result.stderr:
             print("Error:", result.stderr)
         if result.stdout:
@@ -242,12 +286,11 @@ class Worker(QThread):
 
     def get_video_bitrate_kbps(self, file_path):
         ffmpeg_path = get_resource_path("ffmpeg")
-        result = subprocess.run(
+        result = self._run_command(
             [ffmpeg_path, "-hide_banner", "-i", file_path],
-            capture_output=True,
-            text=True,
-            creationflags=(subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0),
         )
+        if result is None:
+            return None
         output = (result.stderr or "") + (result.stdout or "")
         match = re.search(r"bitrate:\s*([0-9]+(?:\.[0-9]+)?)\s*kb/s", output, flags=re.IGNORECASE)
         if not match:
@@ -259,12 +302,11 @@ class Worker(QThread):
 
     def get_video_dimensions(self, file_path):
         ffmpeg_path = get_resource_path("ffmpeg")
-        result = subprocess.run(
+        result = self._run_command(
             [ffmpeg_path, "-hide_banner", "-i", file_path],
-            capture_output=True,
-            text=True,
-            creationflags=(subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0),
         )
+        if result is None:
+            return 0, 0
         output = (result.stderr or "") + (result.stdout or "")
         for line in output.splitlines():
             if " Video: " in line and "x" in line:
@@ -282,7 +324,13 @@ class Worker(QThread):
         progress = 0
 
         for idx, file_path in enumerate(files, start=1):
+            if self._should_stop():
+                self.was_cancelled = True
+                break
             creation_date, tz_offset = self.get_metadata_timestamp(file_path)
+            if self._should_stop():
+                self.was_cancelled = True
+                break
             if creation_date:
                 start_time_unix = self.to_unix_timestamp(creation_date, tz_offset=tz_offset)
                 dt = datetime.datetime.fromtimestamp(start_time_unix)  # Convert the Unix timestamp back to a datetime
@@ -298,6 +346,9 @@ class Worker(QThread):
                     self.transcode_without_timestamp(file_path, output_file)
                 else:
                     self.burn_timestamp(file_path, start_time_unix, output_file)
+                if self._should_stop():
+                    self.was_cancelled = True
+                    break
 
             progress += increment
             set_progress(int(progress))

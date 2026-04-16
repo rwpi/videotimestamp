@@ -20,6 +20,14 @@ class ImportThread(QThread):
         self.selected_date = selected_date
         self.destination_base = destination_base
         self.skip_duplicates = skip_duplicates
+        self.was_cancelled = False
+        self._stop_requested = False
+
+    def stop(self):
+        self._stop_requested = True
+
+    def _should_stop(self):
+        return self._stop_requested
 
     def run(self):
         try:
@@ -171,6 +179,10 @@ class ImportThread(QThread):
 
             new_files = []
             for i, file in enumerate(files_to_copy):
+                if self._should_stop():
+                    self.was_cancelled = True
+                    self.finished.emit(str(folder_path), new_files)
+                    return
                 if self.skip_duplicates:
                     raw_dt = read_datetime_original(file)
                     fingerprint = fingerprint_for_file(file, raw_dt)
@@ -186,6 +198,10 @@ class ImportThread(QThread):
                 destination = folder_path / file.name
                 if not destination.exists():  # Only copy the file if it hasn't been copied already
                     shutil.copy(file, destination)
+                    if self._should_stop():
+                        self.was_cancelled = True
+                        self.finished.emit(str(folder_path), new_files)
+                        return
                 new_files.append(str(destination))
                 if self.skip_duplicates:
                     if fingerprint not in import_ledger_set:
