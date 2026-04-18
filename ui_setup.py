@@ -1,4 +1,5 @@
 from PyQt5.QtWidgets import (
+    QCheckBox,
     QFrame,
     QHBoxLayout,
     QLabel,

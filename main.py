@@ -20,6 +20,7 @@ from timestamp import Worker
 from autodelete import delete_files
 from importtoday import ImportThread
 from check_for_updates import check_for_updates
+from preferences_dialog import PreferencesDialog
 from menubar import setup_menu_bar
 from ui_setup import setup_ui
 import showsdcard
@@ -71,19 +72,12 @@ class ImportPanel(QWidget):
         sd_status_row.addWidget(self.sd_status_button)
         sd_status_row.addStretch(1)
 
-        self.skip_duplicates_checkbox = QCheckBox("Avoid Duplicates")
-        self.skip_duplicates_checkbox.setChecked(
-            self.settings.value("skip_duplicates", True, type=bool)
-        )
-        self.skip_duplicates_checkbox.toggled.connect(self._on_skip_duplicates_toggled)
-
         self.import_button = QPushButton("Import Files")
 
         form_layout = QFormLayout()
         form_layout.addRow("SD card status:", sd_status_row)
         form_layout.addRow("Import date:", self.date_edit)
         form_layout.addRow("Destination folder:", destination_row)
-        form_layout.addRow("", self.skip_duplicates_checkbox)
 
         self.layout = QVBoxLayout()
         self.layout.addStretch(1)
@@ -109,9 +103,6 @@ class ImportPanel(QWidget):
         self.destination_label.setText(display_name)
         if path:
             self.destination_label.setToolTip(path)
-
-    def _on_skip_duplicates_toggled(self, checked):
-        self.settings.setValue("skip_duplicates", checked)
 
     def browse_destination(self):
         start_dir = self.destination_path or self._default_destination_base()
@@ -163,7 +154,7 @@ class ImportPanel(QWidget):
     def get_values(self):
         selected_date = self.date_edit.date().toPyDate()
         destination_base = self.destination_path or None
-        skip_duplicates = self.skip_duplicates_checkbox.isChecked()
+        skip_duplicates = self.settings.value("skip_duplicates", True, type=bool)
         return selected_date, destination_base, skip_duplicates
 
 
@@ -389,28 +380,9 @@ class MainWindow(QMainWindow):
         if self.timestamp_panel is not None:
             self.timestamp_panel.process_button.setEnabled(can_process)
 
-    def save_settings(self):
-        self.settings.setValue('remove_audio', self.remove_audio_action.isChecked())
-        self.settings.setValue('use_hwaccel', self.use_hwaccel_action.isChecked())
-        self.settings.setValue('manually_adjusted_for_dst', self.manually_adjusted_for_dst_action.isChecked())
-        self.settings.setValue('add_hour', self.add_hour_action.isChecked())
-        self.settings.setValue('subtract_hour', self.subtract_hour_action.isChecked())
-        self.settings.setValue(
-            'skip_panasonic_vx3_timestamp',
-            self.skip_panasonic_vx3_timestamp_action.isChecked(),
-        )
-        self.settings.setValue(
-            'skip_lawmate_timestamp',
-            self.skip_lawmate_timestamp_action.isChecked(),
-        )
-        self.settings.setValue(
-            'append_lawmate_covert_suffix',
-            self.append_lawmate_covert_suffix_action.isChecked(),
-        )
-        if hasattr(self, "date_format_group"):
-            selected = self.date_format_group.checkedAction()
-            if selected:
-                self.settings.setValue('date_format', selected.data())
+    def open_preferences(self):
+        dialog = PreferencesDialog(self)
+        dialog.exec_()
 
     def on_worker_finished(self):
         self.timer.stop()
@@ -422,8 +394,6 @@ class MainWindow(QMainWindow):
         if self.timestamp_panel is not None:
             self.timestamp_panel.process_button.setText("Process Video")
         self.check_if_ready_to_process()
-        if not was_cancelled:
-            delete_files(self._files_within_output_folder(self.input_files))
 
     def open_folder(self):
         if self.output_folder_path:
@@ -498,7 +468,7 @@ class MainWindow(QMainWindow):
             self.timer.start(500)
             hwaccel_method = self.hwaccel_method if self.settings.value('use_hwaccel', True, type=bool) else 'libx264'
             remove_audio = self.settings.value('remove_audio', True, type=bool)
-            manually_adjusted_for_dst = self.manually_adjusted_for_dst_action.isChecked()
+            manually_adjusted_for_dst = self.settings.value('manually_adjusted_for_dst', False, type=bool)
             add_hour = self.settings.value('add_hour', False, type=bool)
             subtract_hour = self.settings.value('subtract_hour', False, type=bool)
             date_format = self.settings.value('date_format', "%m-%d-%Y")
@@ -511,8 +481,9 @@ class MainWindow(QMainWindow):
             append_lawmate_covert_suffix = self.settings.value(
                 'append_lawmate_covert_suffix', True, type=bool
             )
+            retain_originals = self.settings.value('retain_originals', False, type=bool)
             self.worker = Worker(
-                self.input_files,
+                list(self.input_files),
                 self.output_folder_path,
                 hwaccel_method,
                 remove_audio,
@@ -523,6 +494,7 @@ class MainWindow(QMainWindow):
                 skip_panasonic_vx3_timestamp,
                 skip_lawmate_timestamp,
                 append_lawmate_covert_suffix,
+                retain_originals,
             )
             total_files = len(self.input_files)
             if total_files > 0:
@@ -532,11 +504,17 @@ class MainWindow(QMainWindow):
             self.progress_bar.setValue(0)
             self.worker.progressChanged.connect(self.progress_bar.setValue)
             self.worker.progressDetail.connect(self.update_timestamp_status)
+            self.worker.fileProcessed.connect(self.on_file_processed)
             self.worker.finished.connect(self.on_worker_finished)
             self.worker.start()
             if self.timestamp_panel is not None:
                 self.timestamp_panel.process_button.setText("Cancel")
                 self.timestamp_panel.process_button.setEnabled(True)
+
+    def on_file_processed(self, file_path):
+        if file_path in self.input_files:
+            self.input_files.remove(file_path)
+            self.refresh_input_file_queue()
 
     def cancel_processing(self):
         if not self.is_processing or not hasattr(self, "worker"):

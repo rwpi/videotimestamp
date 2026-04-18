@@ -3,7 +3,7 @@
 import requests
 
 def check_for_updates():
-    current_version = "2.0.0-Beta7"
+    current_version = "2.0.0-Beta8"
     repo_owner = "rwpi"
     repo_name = "videotimestamp"
 

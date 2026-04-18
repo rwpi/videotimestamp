@@ -2,6 +2,7 @@ import subprocess
 import os
 import datetime
 import re
+import shutil
 from pathlib import Path
 from PyQt5.QtCore import QThread, pyqtSignal
 import sys
@@ -36,6 +37,7 @@ def get_resource_path(relative_path):
 class Worker(QThread):
     progressChanged = pyqtSignal(int)
     progressDetail = pyqtSignal(int, int)
+    fileProcessed = pyqtSignal(str)
     finished = pyqtSignal()  
 
     def __init__(
@@ -51,6 +53,7 @@ class Worker(QThread):
         skip_panasonic_vx3_timestamp=False,
         skip_lawmate_timestamp=False,
         append_lawmate_covert_suffix=True,
+        retain_originals=False,
     ):
         super().__init__()
         self.files = files
@@ -64,6 +67,7 @@ class Worker(QThread):
         self.skip_panasonic_vx3_timestamp = skip_panasonic_vx3_timestamp
         self.skip_lawmate_timestamp = skip_lawmate_timestamp
         self.append_lawmate_covert_suffix = append_lawmate_covert_suffix
+        self.retain_originals = retain_originals
         self.was_cancelled = False
         self._stop_requested = False
         self._current_process = None
@@ -225,7 +229,7 @@ class Worker(QThread):
 
     def burn_timestamp(self, file_path, start_time_unix, output_file):
         if os.path.exists(output_file):
-            return
+            return True
 
         width, height = self.get_video_dimensions(file_path)
         if height:
@@ -256,16 +260,13 @@ class Worker(QThread):
             command += ' -map 0:v:0 -map 0:a:0? -c:a aac -b:a 192k -ac 2'
         command += f' "{output_file}"'
         result = self._run_command(command, shell=True)
-        if result is None:
-            return
-        if result.stderr:
-            print("Error:", result.stderr)
-        if result.stdout:
-            print("Output:", result.stdout)
+        if result is None or result.returncode != 0 or self._should_stop():
+            return False
+        return True
 
     def transcode_without_timestamp(self, file_path, output_file):
         if os.path.exists(output_file):
-            return
+            return True
         ffmpeg_path = get_resource_path("ffmpeg")
         command = f'{ffmpeg_path} -hide_banner -i "{file_path}" -map 0:v:0 -c:v copy'
         if self.remove_audio:
@@ -277,12 +278,9 @@ class Worker(QThread):
             command,
             shell=True,
         )
-        if result is None:
-            return
-        if result.stderr:
-            print("Error:", result.stderr)
-        if result.stdout:
-            print("Output:", result.stdout)
+        if result is None or result.returncode != 0 or self._should_stop():
+            return False
+        return True
 
     def get_video_bitrate_kbps(self, file_path):
         ffmpeg_path = get_resource_path("ffmpeg")
@@ -318,12 +316,15 @@ class Worker(QThread):
     def process_videos(self, files, set_progress):
         set_progress(0)
 
-        total_files = len(files)
+        total_files = len(self.files)
         increment = 100 / total_files if total_files else 0
 
         progress = 0
+        processed = 0
 
-        for idx, file_path in enumerate(files, start=1):
+        while self.files:
+            file_path = self.files.pop(0)
+            processed += 1
             if self._should_stop():
                 self.was_cancelled = True
                 break
@@ -343,16 +344,35 @@ class Worker(QThread):
                 )
                 output_file = os.path.join(self.output_folder_path, output_file_name)
                 if self.should_skip_timestamp_overlay(file_path, camera_identity):
-                    self.transcode_without_timestamp(file_path, output_file)
+                    success = self.transcode_without_timestamp(file_path, output_file)
                 else:
-                    self.burn_timestamp(file_path, start_time_unix, output_file)
+                    success = self.burn_timestamp(file_path, start_time_unix, output_file)
+                if success:
+                    # Handle original file
+                    if self.retain_originals:
+                        originals_dir = os.path.join(self.output_folder_path, "originals")
+                        os.makedirs(originals_dir, exist_ok=True)
+                        shutil.move(file_path, os.path.join(originals_dir, os.path.basename(file_path)))
+                    else:
+                        try:
+                            os.remove(file_path)
+                        except OSError as e:
+                            print(f"Error deleting {file_path}: {e}")
+                    self.fileProcessed.emit(file_path)
+                else:
+                    # If failed and cancelled, remove partial output file
+                    if self._should_stop() and os.path.exists(output_file):
+                        try:
+                            os.remove(output_file)
+                        except OSError as e:
+                            print(f"Error deleting partial output {output_file}: {e}")
                 if self._should_stop():
                     self.was_cancelled = True
                     break
 
             progress += increment
             set_progress(int(progress))
-            self.progressDetail.emit(idx, total_files)
+            self.progressDetail.emit(processed, total_files)
 
     def set_progress(self, value):
         self.progressChanged.emit(value)
