@@ -51,6 +51,7 @@ class Worker(QThread):
         subtract_hour,
         date_format,
         skip_panasonic_vx3_timestamp=False,
+        skip_viofo_timestamp=True,
         skip_lawmate_timestamp=False,
         append_lawmate_covert_suffix=True,
         retain_originals=False,
@@ -65,6 +66,7 @@ class Worker(QThread):
         self.subtract_hour = subtract_hour
         self.date_format = date_format
         self.skip_panasonic_vx3_timestamp = skip_panasonic_vx3_timestamp
+        self.skip_viofo_timestamp = skip_viofo_timestamp
         self.skip_lawmate_timestamp = skip_lawmate_timestamp
         self.append_lawmate_covert_suffix = append_lawmate_covert_suffix
         self.retain_originals = retain_originals
@@ -138,7 +140,7 @@ class Worker(QThread):
             ],
         )
         if result is None:
-            return "", tz_offset
+            return "", None
         if result.stderr:
             print("Error:", result.stderr)
         if result.stdout:
@@ -219,9 +221,20 @@ class Worker(QThread):
             return True
         return False
 
+    def is_viofo_file(self, file_path, camera_identity):
+        identity_upper = camera_identity.upper()
+        if "VIOFO" in identity_upper:
+            return True
+        stem = Path(file_path).stem
+        if re.match(r"^\d{4}_\d{4}_\d{6}_\d{5,6}[A-Z]?$", stem, flags=re.IGNORECASE):
+            return True
+        return False
+
     def should_skip_timestamp_overlay(self, file_path, camera_identity):
         identity_upper = camera_identity.upper()
         if self.skip_panasonic_vx3_timestamp and "HC-VX3" in identity_upper:
+            return True
+        if self.skip_viofo_timestamp and self.is_viofo_file(file_path, camera_identity):
             return True
         if self.skip_lawmate_timestamp and self.is_lawmate_file(file_path, camera_identity):
             return True
@@ -313,6 +326,20 @@ class Worker(QThread):
                     return int(match.group(1)), int(match.group(2))
         return 0, 0
 
+    def get_video_duration_seconds(self, file_path):
+        ffmpeg_path = get_resource_path("ffmpeg")
+        result = self._run_command(
+            [ffmpeg_path, "-hide_banner", "-i", file_path],
+        )
+        if result is None:
+            return None
+        output = (result.stderr or "") + (result.stdout or "")
+        match = re.search(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)", output)
+        if not match:
+            return None
+        hours, minutes, seconds = match.groups()
+        return int(hours) * 3600 + int(minutes) * 60 + float(seconds)
+
     def process_videos(self, files, set_progress):
         set_progress(0)
 
@@ -333,9 +360,13 @@ class Worker(QThread):
                 self.was_cancelled = True
                 break
             if creation_date:
-                start_time_unix = self.to_unix_timestamp(creation_date, tz_offset=tz_offset)
-                dt = datetime.datetime.fromtimestamp(start_time_unix)  # Convert the Unix timestamp back to a datetime
                 camera_identity = self.get_camera_identity(file_path)
+                start_time_unix = self.to_unix_timestamp(creation_date, tz_offset=tz_offset)
+                if self.is_viofo_file(file_path, camera_identity):
+                    duration = self.get_video_duration_seconds(file_path)
+                    if duration is not None:
+                        start_time_unix = int(round(start_time_unix - duration))
+                dt = datetime.datetime.fromtimestamp(start_time_unix)  # Convert the Unix timestamp back to a datetime
                 lawmate_suffix = ""
                 if self.append_lawmate_covert_suffix and self.is_lawmate_file(file_path, camera_identity):
                     lawmate_suffix = "_COVERT"

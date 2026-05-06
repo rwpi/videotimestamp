@@ -5,6 +5,7 @@ import re
 import signal
 import subprocess
 import tempfile
+from collections import Counter
 from pathlib import Path
 
 from PyQt5 import QtCore, QtWidgets
@@ -147,15 +148,17 @@ class DroppableQueueList(QtWidgets.QListWidget):
         super().__init__()
         self.owner = owner
         self.setAcceptDrops(True)
+        self.setDefaultDropAction(QtCore.Qt.DropAction.MoveAction)
+        self.setDragDropMode(QtWidgets.QAbstractItemView.DragDropMode.InternalMove)
 
     def dragEnterEvent(self, event):
-        if event.mimeData().hasUrls():
+        if event.mimeData().hasUrls() or event.source() is self:
             event.acceptProposedAction()
             return
         super().dragEnterEvent(event)
 
     def dragMoveEvent(self, event):
-        if event.mimeData().hasUrls():
+        if event.mimeData().hasUrls() or event.source() is self:
             event.acceptProposedAction()
             return
         super().dragMoveEvent(event)
@@ -165,6 +168,9 @@ class DroppableQueueList(QtWidgets.QListWidget):
         if paths:
             self.owner.add_input_files(paths)
             event.acceptProposedAction()
+            return
+        if event.source() is self:
+            super().dropEvent(event)
             return
         super().dropEvent(event)
 
@@ -234,6 +240,68 @@ class MergeWorker(QtCore.QObject):
         except Exception as exc:
             self.failed.emit(str(exc))
 
+    def _get_video_frame_rate(self, file_path: Path) -> float | None:
+        ffmpeg_path = get_resource_path("ffmpeg")
+        try:
+            result = subprocess.run(
+                [
+                    ffmpeg_path,
+                    "-hide_banner",
+                    "-select_streams",
+                    "v:0",
+                    "-show_entries",
+                    "stream=r_frame_rate",
+                    "-of",
+                    "default=noprint_wrappers=1:nokey=1:noinvalidate_exprs=1",
+                    str(file_path),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                fps_str = result.stdout.strip()
+                if "/" in fps_str:
+                    num, denom = fps_str.split("/")
+                    return float(num) / float(denom)
+                else:
+                    return float(fps_str)
+        except Exception:
+            pass
+        return None
+
+    def _get_video_resolution(self, file_path: Path) -> tuple[int, int] | None:
+        ffmpeg_path = get_resource_path("ffmpeg")
+        try:
+            result = subprocess.run(
+                [
+                    ffmpeg_path,
+                    "-hide_banner",
+                    "-select_streams",
+                    "v:0",
+                    "-show_entries",
+                    "stream=width,height",
+                    "-of",
+                    "default=noprint_wrappers=1:nokey=1:noinvalidate_exprs=1",
+                    str(file_path),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                lines = result.stdout.strip().split("\n")
+                if len(lines) >= 2:
+                    try:
+                        width = int(lines[0].strip())
+                        height = int(lines[1].strip())
+                        return (width, height)
+                    except ValueError:
+                        pass
+        except Exception:
+            pass
+        return None
+
     def _merge_group(self, group_name: str, clips: list[Path]) -> Path:
         ffmpeg_path = get_resource_path("ffmpeg")
         base_name = merge_output_name_for_clips(clips)
@@ -242,6 +310,44 @@ class MergeWorker(QtCore.QObject):
             duration for duration in (get_duration_seconds(clip) for clip in clips) if duration is not None
         )
 
+        # Check user settings for manual override
+        settings = QSettings("VideoTimestamp", "VTS")
+        manual_resolution_str = settings.value('merge/target_resolution', None)
+        manual_fps = settings.value('merge/target_fps', None, type=float)
+        
+        target_fps = manual_fps
+        target_resolution = None
+        
+        # Parse manual resolution if set
+        if manual_resolution_str:
+            parts = manual_resolution_str.split('x')
+            if len(parts) == 2:
+                try:
+                    target_resolution = (int(parts[0]), int(parts[1]))
+                except ValueError:
+                    target_resolution = None
+        
+        # If automatic, detect most common across all clips
+        if target_fps is None or target_resolution is None:
+            if clips:
+                frame_rates = []
+                resolutions = []
+                
+                for clip in clips:
+                    if target_fps is None:
+                        fps = self._get_video_frame_rate(clip)
+                        if fps:
+                            frame_rates.append(fps)
+                    if target_resolution is None:
+                        res = self._get_video_resolution(clip)
+                        if res:
+                            resolutions.append(res)
+                
+                if target_fps is None and frame_rates:
+                    target_fps = Counter(frame_rates).most_common(1)[0][0]
+                if target_resolution is None and resolutions:
+                    target_resolution = Counter(resolutions).most_common(1)[0][0]
+
         with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False, encoding="utf-8") as handle:
             list_path = Path(handle.name)
             for clip in clips:
@@ -249,31 +355,45 @@ class MergeWorker(QtCore.QObject):
                 handle.write(f"file '{escaped}'\n")
 
         try:
+            video_filters = []
+            if target_resolution:
+                # Scale preserving aspect ratio to avoid distortion, then pad to exact target
+                video_filters.append(f"scale={target_resolution[0]}:{target_resolution[1]}:force_original_aspect_ratio=decrease")
+                video_filters.append(f"pad={target_resolution[0]}:{target_resolution[1]}:(ow-iw)/2:(oh-ih)/2:black")
+            if target_fps:
+                video_filters.append(f"fps={target_fps}")
+
+            ffmpeg_cmd = [
+                ffmpeg_path,
+                "-hide_banner",
+                "-y",
+                "-loglevel",
+                "error",
+                "-nostats",
+                "-f",
+                "concat",
+                "-safe",
+                "0",
+                "-i",
+                str(list_path),
+                "-progress",
+                "pipe:1",
+            ]
+            if video_filters:
+                ffmpeg_cmd.extend(["-vf", ",".join(video_filters)])
+            ffmpeg_cmd.extend(self._video_encoder_args())
+            ffmpeg_cmd.extend([
+                "-c:a",
+                "aac",
+                "-b:a",
+                "192k",
+                "-movflags",
+                "+faststart",
+                str(output_path),
+            ])
+
             process = subprocess.Popen(
-                [
-                    ffmpeg_path,
-                    "-hide_banner",
-                    "-y",
-                    "-loglevel",
-                    "error",
-                    "-nostats",
-                    "-f",
-                    "concat",
-                    "-safe",
-                    "0",
-                    "-i",
-                    str(list_path),
-                    "-progress",
-                    "pipe:1",
-                    *self._video_encoder_args(),
-                    "-c:a",
-                    "aac",
-                    "-b:a",
-                    "192k",
-                    "-movflags",
-                    "+faststart",
-                    str(output_path),
-                ],
+                ffmpeg_cmd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
@@ -352,7 +472,7 @@ class MainWindow(QtWidgets.QWidget):
         self.clip_list = DroppableQueueList(self)
         self.clip_list.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
         self.clip_list.setStyleSheet("QListWidget { border: 1px dashed #4a4a4a; }")
-        self.clip_list.setToolTip("Drag and drop video files here")
+        self.clip_list.setToolTip("Drag and drop video files to add • Drag items to reorder")
         self.file_queue_title = QtWidgets.QLabel("File Queue")
         self.file_queue_title.setStyleSheet("font-size: 13px; font-weight: 600;")
         self.input_files_label = QtWidgets.QLabel("0 Input Files Selected")
@@ -467,13 +587,24 @@ class MainWindow(QtWidgets.QWidget):
         self._clips.difference_update(Path(path) for path in selected_files)
         self._refresh_queue_display()
 
-    def _refresh_queue_display(self):
+    def _refresh_queue_display(self, should_sort: bool = True):
         self.clip_list.clear()
-        for path in sorted(self._clips, key=lambda item: natural_sort_key(item.name)):
+        clips_to_display = sorted(self._clips, key=lambda item: natural_sort_key(item.name)) if should_sort else list(self._clips)
+        for path in clips_to_display:
             self.clip_list.addItem(path.name)
             item = self.clip_list.item(self.clip_list.count() - 1)
             item.setData(QtCore.Qt.UserRole, str(path))
         self.input_files_label.setText(f"{len(self._clips)} Input Files Selected")
+
+    def _get_clips_in_queue_order(self) -> list[Path]:
+        """Get clips in the order they appear in the UI queue (respects manual reordering)."""
+        clips = []
+        for i in range(self.clip_list.count()):
+            item = self.clip_list.item(i)
+            path_str = item.data(QtCore.Qt.UserRole)
+            if path_str:
+                clips.append(Path(path_str))
+        return clips
 
     def refresh_clips(self):
         # No auto-population. Merge queue is managed manually.
@@ -505,7 +636,8 @@ class MainWindow(QtWidgets.QWidget):
             QtWidgets.QMessageBox.warning(self, "No Clips", "Please add clips to the merge queue.")
             return
 
-        groups = [("main", sorted(self._clips, key=lambda item: natural_sort_key(item.name)))]
+        clips_in_order = self._get_clips_in_queue_order()
+        groups = [("main", clips_in_order)]
 
         self._set_running(True)
         self.status_changed.emit("Starting merge")

@@ -44,6 +44,7 @@ class PreferencesDialog(QDialog):
             "File Handling",
             "Time Correction",
             "Date Format",
+            "Merge Settings",
         ]:
             item = QListWidgetItem(section)
             item.setTextAlignment(Qt.AlignVCenter | Qt.AlignLeft)
@@ -56,6 +57,7 @@ class PreferencesDialog(QDialog):
         self.stack.addWidget(self._build_file_handling_page())
         self.stack.addWidget(self._build_time_correction_page())
         self.stack.addWidget(self._build_date_format_page())
+        self.stack.addWidget(self._build_merge_settings_page())
 
         self.sidebar.currentRowChanged.connect(self.stack.setCurrentIndex)
         self.sidebar.setCurrentRow(0)
@@ -132,10 +134,12 @@ class PreferencesDialog(QDialog):
         layout.setSpacing(12)
 
         self.skip_panasonic_vx3_checkbox = QCheckBox("Skip Timestamp for Panasonic HC-VX3")
+        self.skip_viofo_checkbox = QCheckBox("Skip Timestamp for VIOFO dash cam files")
         self.skip_lawmate_checkbox = QCheckBox("Skip Timestamp for LawMate Covert Cam")
         self.append_lawmate_checkbox = QCheckBox("Append _COVERT to processed LawMate filenames")
 
         layout.addWidget(self.skip_panasonic_vx3_checkbox)
+        layout.addWidget(self.skip_viofo_checkbox)
         layout.addWidget(self.skip_lawmate_checkbox)
         layout.addWidget(self.append_lawmate_checkbox)
         layout.addStretch(1)
@@ -186,6 +190,43 @@ class PreferencesDialog(QDialog):
         layout.addStretch(1)
         return page
 
+    def _build_merge_settings_page(self):
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(12)
+
+        layout.addWidget(QLabel("Video Resolution:"))
+        self.merge_resolution_combo = QComboBox()
+        self.merge_resolution_combo.addItem("Automatic (most common)", None)
+        self.merge_resolution_combo.addItem("1920 × 1080", "1920x1080")
+        self.merge_resolution_combo.addItem("2560 × 1080", "2560x1080")
+        self.merge_resolution_combo.addItem("2560 × 1440", "2560x1440")
+        self.merge_resolution_combo.addItem("3840 × 2160 (4K)", "3840x2160")
+        layout.addWidget(self.merge_resolution_combo)
+
+        layout.addWidget(QLabel("Frame Rate (fps):"))
+        self.merge_fps_combo = QComboBox()
+        self.merge_fps_combo.addItem("Automatic (most common)", None)
+        self.merge_fps_combo.addItem("20 fps", 20.0)
+        self.merge_fps_combo.addItem("24 fps", 24.0)
+        self.merge_fps_combo.addItem("25 fps", 25.0)
+        self.merge_fps_combo.addItem("29.97 fps", 29.97)
+        self.merge_fps_combo.addItem("30 fps", 30.0)
+        self.merge_fps_combo.addItem("50 fps", 50.0)
+        self.merge_fps_combo.addItem("59.94 fps", 59.94)
+        self.merge_fps_combo.addItem("60 fps", 60.0)
+        layout.addWidget(self.merge_fps_combo)
+
+        layout.addWidget(QLabel("Aspect Ratio Handling:"))
+        self.merge_aspect_combo = QComboBox()
+        self.merge_aspect_combo.addItem("Letterbox with black bars (preserve content)", "letterbox")
+        self.merge_aspect_combo.addItem("Stretch to fit (may distort)", "stretch")
+        layout.addWidget(self.merge_aspect_combo)
+
+        layout.addStretch(1)
+        return page
+
     def load_settings(self):
         self.use_hwaccel_checkbox.setChecked(self.settings.value('use_hwaccel', True, type=bool))
         self.remove_audio_checkbox.setChecked(self.settings.value('remove_audio', True, type=bool))
@@ -193,6 +234,7 @@ class PreferencesDialog(QDialog):
         self.add_hour_checkbox.setChecked(self.settings.value('add_hour', False, type=bool))
         self.subtract_hour_checkbox.setChecked(self.settings.value('subtract_hour', False, type=bool))
         self.skip_panasonic_vx3_checkbox.setChecked(self.settings.value('skip_panasonic_vx3_timestamp', False, type=bool))
+        self.skip_viofo_checkbox.setChecked(self.settings.value('skip_viofo_timestamp', True, type=bool))
         self.skip_lawmate_checkbox.setChecked(self.settings.value('skip_lawmate_timestamp', True, type=bool))
         self.append_lawmate_checkbox.setChecked(self.settings.value('append_lawmate_covert_suffix', True, type=bool))
         self.retain_originals_checkbox.setChecked(self.settings.value('retain_originals', False, type=bool))
@@ -221,6 +263,32 @@ class PreferencesDialog(QDialog):
                 selected_index = idx
                 break
         self.date_format_combo.setCurrentIndex(selected_index)
+        
+        merge_resolution = self.settings.value('merge/target_resolution', None)
+        merge_res_index = 0
+        if merge_resolution:
+            for idx in range(self.merge_resolution_combo.count()):
+                if self.merge_resolution_combo.itemData(idx) == merge_resolution:
+                    merge_res_index = idx
+                    break
+        self.merge_resolution_combo.setCurrentIndex(merge_res_index)
+        
+        merge_fps = self.settings.value('merge/target_fps', None, type=float)
+        merge_fps_index = 0
+        if merge_fps:
+            for idx in range(self.merge_fps_combo.count()):
+                if self.merge_fps_combo.itemData(idx) == merge_fps:
+                    merge_fps_index = idx
+                    break
+        self.merge_fps_combo.setCurrentIndex(merge_fps_index)
+        
+        merge_aspect = self.settings.value('merge/aspect_ratio_handling', 'letterbox')
+        merge_aspect_index = 0
+        for idx in range(self.merge_aspect_combo.count()):
+            if self.merge_aspect_combo.itemData(idx) == merge_aspect:
+                merge_aspect_index = idx
+                break
+        self.merge_aspect_combo.setCurrentIndex(merge_aspect_index)
 
     def _save_and_close(self):
         self.settings.setValue('use_hwaccel', self.use_hwaccel_checkbox.isChecked())
@@ -229,6 +297,7 @@ class PreferencesDialog(QDialog):
         self.settings.setValue('add_hour', self.add_hour_checkbox.isChecked())
         self.settings.setValue('subtract_hour', self.subtract_hour_checkbox.isChecked())
         self.settings.setValue('skip_panasonic_vx3_timestamp', self.skip_panasonic_vx3_checkbox.isChecked())
+        self.settings.setValue('skip_viofo_timestamp', self.skip_viofo_checkbox.isChecked())
         self.settings.setValue('skip_lawmate_timestamp', self.skip_lawmate_checkbox.isChecked())
         self.settings.setValue('append_lawmate_covert_suffix', self.append_lawmate_checkbox.isChecked())
         self.settings.setValue('retain_originals', self.retain_originals_checkbox.isChecked())
@@ -249,5 +318,7 @@ class PreferencesDialog(QDialog):
         self.settings.setValue('vrn/human_tag', self.renamer_human_tag_combo.currentText().strip().upper())
         selected_format = self.DATE_FORMATS[self.date_format_combo.currentIndex()][1]
         self.settings.setValue('date_format', selected_format)
+        self.settings.setValue('merge/target_resolution', self.merge_resolution_combo.currentData())
+        self.settings.setValue('merge/target_fps', self.merge_fps_combo.currentData())
         self.settings.sync()
         self.accept()

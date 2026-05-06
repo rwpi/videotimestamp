@@ -475,6 +475,9 @@ class MainWindow(QMainWindow):
             skip_panasonic_vx3_timestamp = self.settings.value(
                 'skip_panasonic_vx3_timestamp', False, type=bool
             )
+            skip_viofo_timestamp = self.settings.value(
+                'skip_viofo_timestamp', True, type=bool
+            )
             skip_lawmate_timestamp = self.settings.value(
                 'skip_lawmate_timestamp', True, type=bool
             )
@@ -492,6 +495,7 @@ class MainWindow(QMainWindow):
                 subtract_hour,
                 date_format,
                 skip_panasonic_vx3_timestamp,
+                skip_viofo_timestamp,
                 skip_lawmate_timestamp,
                 append_lawmate_covert_suffix,
                 retain_originals,
