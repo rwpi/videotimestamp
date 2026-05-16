@@ -4,7 +4,6 @@ import os
 import re
 import signal
 import subprocess
-import tempfile
 from collections import Counter
 from pathlib import Path
 
@@ -143,6 +142,14 @@ def natural_sort_key(value: str):
     return [int(part) if part.isdigit() else part.lower() for part in re.split(r"(\d+)", value)]
 
 
+def ffprobe_path_for(ffmpeg_path: str) -> str:
+    suffix = ".exe" if os.name == "nt" else ""
+    path = Path(ffmpeg_path)
+    if path.parent == Path("."):
+        return f"ffprobe{suffix}"
+    return str(path.with_name(f"ffprobe{suffix}"))
+
+
 class DroppableQueueList(QtWidgets.QListWidget):
     def __init__(self, owner):
         super().__init__()
@@ -241,18 +248,19 @@ class MergeWorker(QtCore.QObject):
             self.failed.emit(str(exc))
 
     def _get_video_frame_rate(self, file_path: Path) -> float | None:
-        ffmpeg_path = get_resource_path("ffmpeg")
+        ffprobe_path = ffprobe_path_for(get_resource_path("ffmpeg"))
         try:
             result = subprocess.run(
                 [
-                    ffmpeg_path,
-                    "-hide_banner",
+                    ffprobe_path,
+                    "-v",
+                    "error",
                     "-select_streams",
                     "v:0",
                     "-show_entries",
                     "stream=r_frame_rate",
                     "-of",
-                    "default=noprint_wrappers=1:nokey=1:noinvalidate_exprs=1",
+                    "default=noprint_wrappers=1:nokey=1",
                     str(file_path),
                 ],
                 capture_output=True,
@@ -271,18 +279,19 @@ class MergeWorker(QtCore.QObject):
         return None
 
     def _get_video_resolution(self, file_path: Path) -> tuple[int, int] | None:
-        ffmpeg_path = get_resource_path("ffmpeg")
+        ffprobe_path = ffprobe_path_for(get_resource_path("ffmpeg"))
         try:
             result = subprocess.run(
                 [
-                    ffmpeg_path,
-                    "-hide_banner",
+                    ffprobe_path,
+                    "-v",
+                    "error",
                     "-select_streams",
                     "v:0",
                     "-show_entries",
                     "stream=width,height",
                     "-of",
-                    "default=noprint_wrappers=1:nokey=1:noinvalidate_exprs=1",
+                    "default=noprint_wrappers=1:nokey=1",
                     str(file_path),
                 ],
                 capture_output=True,
@@ -302,13 +311,89 @@ class MergeWorker(QtCore.QObject):
             pass
         return None
 
+    def _has_audio_stream(self, file_path: Path) -> bool:
+        ffprobe_path = ffprobe_path_for(get_resource_path("ffmpeg"))
+        try:
+            result = subprocess.run(
+                [
+                    ffprobe_path,
+                    "-v",
+                    "error",
+                    "-select_streams",
+                    "a:0",
+                    "-show_entries",
+                    "stream=index",
+                    "-of",
+                    "default=noprint_wrappers=1:nokey=1",
+                    str(file_path),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            return result.returncode == 0 and bool(result.stdout.strip())
+        except Exception:
+            return False
+
+    def _build_concat_filter(
+        self,
+        clips: list[Path],
+        target_resolution: tuple[int, int] | None,
+        target_fps: float | None,
+        audio_streams: list[bool],
+        durations: list[float | None],
+    ) -> tuple[str, list[str]]:
+        filters = []
+        concat_inputs = []
+        include_audio = any(audio_streams)
+
+        for index, clip in enumerate(clips):
+            video_chain = f"[{index}:v:0]setpts=PTS-STARTPTS"
+            if target_resolution:
+                width, height = target_resolution
+                video_chain += (
+                    f",scale={width}:{height}:force_original_aspect_ratio=decrease"
+                    f",pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:black"
+                )
+            if target_fps:
+                video_chain += f",fps={target_fps}"
+            video_chain += ",setsar=1"
+            video_label = f"v{index}"
+            filters.append(f"{video_chain}[{video_label}]")
+            concat_inputs.append(f"[{video_label}]")
+
+            if include_audio:
+                audio_label = f"a{index}"
+                audio_chain = "asetpts=PTS-STARTPTS,aformat=sample_rates=48000:channel_layouts=stereo"
+                if audio_streams[index]:
+                    filters.append(f"[{index}:a:0]{audio_chain}[{audio_label}]")
+                else:
+                    duration = durations[index] or get_duration_seconds(clip) or 0.001
+                    filters.append(
+                        "anullsrc=channel_layout=stereo:sample_rate=48000,"
+                        f"atrim=duration={duration},{audio_chain}[{audio_label}]"
+                    )
+                concat_inputs.append(f"[{audio_label}]")
+
+        audio_count = 1 if include_audio else 0
+        output_labels = ["[v]"]
+        if include_audio:
+            output_labels.append("[a]")
+        filters.append(
+            f"{''.join(concat_inputs)}concat=n={len(clips)}:v=1:a={audio_count}{''.join(output_labels)}"
+        )
+
+        maps = ["-map", "[v]"]
+        if include_audio:
+            maps.extend(["-map", "[a]"])
+        return ";".join(filters), maps
+
     def _merge_group(self, group_name: str, clips: list[Path]) -> Path:
         ffmpeg_path = get_resource_path("ffmpeg")
         base_name = merge_output_name_for_clips(clips)
         output_path = ensure_unique_output_path(self.folder, base_name)
-        total_duration_seconds = sum(
-            duration for duration in (get_duration_seconds(clip) for clip in clips) if duration is not None
-        )
+        durations = [get_duration_seconds(clip) for clip in clips]
+        total_duration_seconds = sum(duration for duration in durations if duration is not None)
 
         # Check user settings for manual override
         settings = QSettings("VideoTimestamp", "VTS")
@@ -348,21 +433,17 @@ class MergeWorker(QtCore.QObject):
                 if target_resolution is None and resolutions:
                     target_resolution = Counter(resolutions).most_common(1)[0][0]
 
-        with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False, encoding="utf-8") as handle:
-            list_path = Path(handle.name)
-            for clip in clips:
-                escaped = str(clip).replace("\\", "\\\\").replace("'", "\\'")
-                handle.write(f"file '{escaped}'\n")
+        audio_streams = [self._has_audio_stream(clip) for clip in clips]
+        filter_complex, output_maps = self._build_concat_filter(
+            clips,
+            target_resolution,
+            target_fps,
+            audio_streams,
+            durations,
+        )
+        include_audio = any(audio_streams)
 
         try:
-            video_filters = []
-            if target_resolution:
-                # Scale preserving aspect ratio to avoid distortion, then pad to exact target
-                video_filters.append(f"scale={target_resolution[0]}:{target_resolution[1]}:force_original_aspect_ratio=decrease")
-                video_filters.append(f"pad={target_resolution[0]}:{target_resolution[1]}:(ow-iw)/2:(oh-ih)/2:black")
-            if target_fps:
-                video_filters.append(f"fps={target_fps}")
-
             ffmpeg_cmd = [
                 ffmpeg_path,
                 "-hide_banner",
@@ -370,27 +451,22 @@ class MergeWorker(QtCore.QObject):
                 "-loglevel",
                 "error",
                 "-nostats",
-                "-f",
-                "concat",
-                "-safe",
-                "0",
-                "-i",
-                str(list_path),
+            ]
+            for clip in clips:
+                ffmpeg_cmd.extend(["-fflags", "+genpts", "-i", str(clip)])
+            ffmpeg_cmd.extend([
+                "-filter_complex",
+                filter_complex,
+                *output_maps,
                 "-progress",
                 "pipe:1",
-            ]
-            if video_filters:
-                ffmpeg_cmd.extend(["-vf", ",".join(video_filters)])
-            ffmpeg_cmd.extend(self._video_encoder_args())
-            ffmpeg_cmd.extend([
-                "-c:a",
-                "aac",
-                "-b:a",
-                "192k",
-                "-movflags",
-                "+faststart",
-                str(output_path),
             ])
+            ffmpeg_cmd.extend(self._video_encoder_args())
+            if include_audio:
+                ffmpeg_cmd.extend(["-c:a", "aac", "-b:a", "192k"])
+            else:
+                ffmpeg_cmd.append("-an")
+            ffmpeg_cmd.extend(["-movflags", "+faststart", str(output_path)])
 
             process = subprocess.Popen(
                 ffmpeg_cmd,
@@ -427,10 +503,6 @@ class MergeWorker(QtCore.QObject):
             return_code = process.wait()
         finally:
             self._current_process = None
-            try:
-                list_path.unlink()
-            except OSError:
-                pass
 
         if self._should_stop():
             self.was_cancelled = True
