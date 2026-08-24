@@ -1,6 +1,8 @@
 # Video Timestamp For Private Investigators (VTS)
 
-# **[*Download Latest Version Here*](https://github.com/rwpi/videotimestamp/releases/latest)**
+# **[*Download Classic Version Here (Macos/Windows)*](https://github.com/rwpi/videotimestamp/releases/latest)**
+
+# **[*Download Latest Beta Version Here (Macos Only)*](https://github.com/rwpi/videotimestamp/releases/tag/VTS-2.0.0-Beta9)**
 
 ## Overview
 Private Investigator Video Timestamp (VTS) is a cross-platform Python-based application that adds timestamp overlays to camcorder video files. It leverages the metadata within a file to extract date and time information, which is then overlaid onto the video files.
@@ -15,7 +17,7 @@ VTS is currently optimized for macOS computers with builds for M1 and Intel avai
 
 Follow these steps to install VTS:
 
-1. Click on the "Download Here" link above to go to the latest release page.
+1. Click on the appropriate download link above to go to the release page.
 2. Download the appropriate version for your operating system.
 
 For **Windows** users:

@@ -107,7 +107,7 @@ def is_merge_output(path: Path) -> bool:
 
 def classify_merge_group(path: Path) -> str:
     stem_upper = path.stem.upper()
-    if stem_upper.endswith("_CLAIMANT"):
+    if stem_upper.endswith("_CLAIMANT") or stem_upper.endswith("_COVERT"):
         return "claimant"
     if stem_upper.endswith("_INTEGRITY"):
         return "integrity"
@@ -126,16 +126,17 @@ def ensure_unique_output_path(folder: Path, base_name: str) -> Path:
         counter += 1
 
 
-def merge_output_name_for_clips(clips: list[Path]) -> str:
+def merge_output_name_for_clips(clips: list[Path], group_name: str = "main") -> str:
     clip_dates = [
         clip_datetime.date()
         for clip_datetime in (extract_clip_datetime(clip) for clip in clips)
         if clip_datetime is not None
     ]
+    group_suffix = "" if group_name == "main" else f"_{group_name.upper()}"
     if not clip_dates:
-        return "merged_clips.mp4"
+        return f"merged_clips{group_suffix}.mp4"
     first_date = min(clip_dates)
-    return f"{first_date.strftime('%m-%d-%Y')}_MERGED.mp4"
+    return f"{first_date.strftime('%m-%d-%Y')}{group_suffix}_MERGED.mp4"
 
 
 def natural_sort_key(value: str):
@@ -348,7 +349,7 @@ class MergeWorker(QtCore.QObject):
         include_audio = any(audio_streams)
 
         for index, clip in enumerate(clips):
-            video_chain = f"[{index}:v:0]setpts=PTS-STARTPTS"
+            video_chain = f"[{index}:v:0]settb=AVTB,setpts=PTS-STARTPTS"
             if target_resolution:
                 width, height = target_resolution
                 video_chain += (
@@ -356,7 +357,7 @@ class MergeWorker(QtCore.QObject):
                     f",pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:black"
                 )
             if target_fps:
-                video_chain += f",fps={target_fps}"
+                video_chain += f",fps={target_fps},setpts=N/({target_fps}*TB)"
             video_chain += ",setsar=1"
             video_label = f"v{index}"
             filters.append(f"{video_chain}[{video_label}]")
@@ -364,14 +365,14 @@ class MergeWorker(QtCore.QObject):
 
             if include_audio:
                 audio_label = f"a{index}"
-                audio_chain = "asetpts=PTS-STARTPTS,aformat=sample_rates=48000:channel_layouts=stereo"
+                audio_chain = "asettb=AVTB,asetpts=PTS-STARTPTS,aformat=sample_rates=48000:channel_layouts=stereo"
                 if audio_streams[index]:
                     filters.append(f"[{index}:a:0]{audio_chain}[{audio_label}]")
                 else:
                     duration = durations[index] or get_duration_seconds(clip) or 0.001
                     filters.append(
                         "anullsrc=channel_layout=stereo:sample_rate=48000,"
-                        f"atrim=duration={duration},{audio_chain}[{audio_label}]"
+                        f"atrim=0:duration={duration},{audio_chain}[{audio_label}]"
                     )
                 concat_inputs.append(f"[{audio_label}]")
 
@@ -390,7 +391,7 @@ class MergeWorker(QtCore.QObject):
 
     def _merge_group(self, group_name: str, clips: list[Path]) -> Path:
         ffmpeg_path = get_resource_path("ffmpeg")
-        base_name = merge_output_name_for_clips(clips)
+        base_name = merge_output_name_for_clips(clips, group_name)
         output_path = ensure_unique_output_path(self.folder, base_name)
         durations = [get_duration_seconds(clip) for clip in clips]
         total_duration_seconds = sum(duration for duration in durations if duration is not None)
@@ -399,6 +400,8 @@ class MergeWorker(QtCore.QObject):
         settings = QSettings("VideoTimestamp", "VTS")
         manual_resolution_str = settings.value('merge/target_resolution', None)
         manual_fps = settings.value('merge/target_fps', None, type=float)
+        if manual_fps is not None and manual_fps <= 0:
+            manual_fps = None
         
         target_fps = manual_fps
         target_resolution = None
@@ -471,7 +474,7 @@ class MergeWorker(QtCore.QObject):
             process = subprocess.Popen(
                 ffmpeg_cmd,
                 stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
                 text=True,
                 bufsize=1,
                 creationflags=(subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0),
@@ -479,13 +482,20 @@ class MergeWorker(QtCore.QObject):
             )
             self._current_process = process
 
+            ffmpeg_output_lines = []
             if process.stdout is not None:
                 for line in process.stdout:
                     if self._should_stop():
                         self._terminate_current_process()
                         break
                     line = line.strip()
-                    if not line.startswith("out_time_ms=") or total_duration_seconds <= 0:
+                    if not line:
+                        continue
+                    if not line.startswith("out_time_ms="):
+                        if not line.startswith(("frame=", "fps=", "stream_", "bitrate=", "total_size=", "out_time=", "dup_frames=", "drop_frames=", "speed=", "progress=")):
+                            ffmpeg_output_lines.append(line)
+                        continue
+                    if total_duration_seconds <= 0:
                         continue
                     try:
                         out_time_ms = int(line.split("=", 1)[1])
@@ -497,9 +507,6 @@ class MergeWorker(QtCore.QObject):
                     )
                     self.progress.emit(progress_value)
 
-            stderr_output = ""
-            if process.stderr is not None:
-                stderr_output = process.stderr.read()
             return_code = process.wait()
         finally:
             self._current_process = None
@@ -512,7 +519,8 @@ class MergeWorker(QtCore.QObject):
                 pass
             return output_path
         if return_code != 0:
-            raise RuntimeError((stderr_output or "ffmpeg merge failed").strip())
+            ffmpeg_output = "\n".join(ffmpeg_output_lines[-20:])
+            raise RuntimeError((ffmpeg_output or "ffmpeg merge failed").strip())
         return output_path
 
     def _video_encoder_args(self) -> list[str]:
@@ -709,7 +717,14 @@ class MainWindow(QtWidgets.QWidget):
             return
 
         clips_in_order = self._get_clips_in_queue_order()
-        groups = [("main", clips_in_order)]
+        grouped_clips: dict[str, list[Path]] = {"claimant": [], "integrity": [], "main": []}
+        for clip in clips_in_order:
+            grouped_clips[classify_merge_group(clip)].append(clip)
+        groups = [
+            (group_name, grouped_clips[group_name])
+            for group_name in ("claimant", "integrity", "main")
+            if grouped_clips[group_name]
+        ]
 
         self._set_running(True)
         self.status_changed.emit("Starting merge")

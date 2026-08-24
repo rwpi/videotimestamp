@@ -1,5 +1,8 @@
 import sys, os
 from pathlib import Path
+from contextlib import suppress
+from collections import deque
+from PyQt5 import sip
 from PyQt5.QtWidgets import (
     QApplication,
     QWidget,
@@ -214,6 +217,106 @@ class MainWindow(QMainWindow):
         self.check_for_updates()
         self.set_active_nav_button(self.import_button)
         self.check_if_ready_to_process()
+        self._is_shutting_down = False
+
+    def closeEvent(self, event):
+        self.shutdown()
+        event.accept()
+
+    def shutdown(self):
+        if self._is_shutting_down:
+            return
+        self._is_shutting_down = True
+
+        for timer in (
+            getattr(self, "timer", None),
+            getattr(getattr(self, "import_panel", None), "sd_timer", None),
+        ):
+            if timer is not None:
+                with suppress(Exception):
+                    timer.stop()
+
+        self._stop_processing_threads()
+        self._cleanup_multimedia_objects()
+
+    def _stop_processing_threads(self):
+        worker = getattr(self, "worker", None)
+        if worker is not None and worker.isRunning():
+            with suppress(Exception):
+                worker.stop()
+            worker.wait(5000)
+
+        import_thread = getattr(self, "import_thread", None)
+        if import_thread is not None and import_thread.isRunning():
+            with suppress(Exception):
+                import_thread.stop()
+            import_thread.wait(5000)
+
+        for module in (
+            self.video_renamer_window,
+            self.merge_clips_window,
+            getattr(self, "video_trimmer_window", None),
+        ):
+            if module is None:
+                continue
+            module_worker = getattr(module, "_worker", None)
+            if module_worker is not None:
+                with suppress(Exception):
+                    module_worker.stop()
+            module_thread = getattr(module, "_thread", None)
+            if module_thread is not None and module_thread.isRunning():
+                with suppress(Exception):
+                    module_thread.quit()
+                module_thread.wait(5000)
+
+    def _cleanup_multimedia_objects(self):
+        objects = deque([self])
+        seen = set()
+
+        while objects:
+            obj = objects.popleft()
+            obj_id = id(obj)
+            if obj_id in seen:
+                continue
+            seen.add(obj_id)
+
+            self._cleanup_single_multimedia_object(obj)
+
+            for child in getattr(obj, "children", lambda: [])():
+                objects.append(child)
+
+            for attr_name in (
+                "preview_player",
+                "media_player",
+                "player",
+                "preview_video_widget",
+                "video_widget",
+            ):
+                with suppress(Exception):
+                    attr_value = getattr(obj, attr_name, None)
+                if attr_value is not None:
+                    objects.append(attr_value)
+
+    def _cleanup_single_multimedia_object(self, obj):
+        class_name = type(obj).__name__
+
+        if class_name == "QMediaPlayer":
+            with suppress(Exception):
+                obj.stop()
+            with suppress(Exception):
+                obj.setVideoOutput(None)
+            with suppress(Exception):
+                from PyQt5.QtMultimedia import QMediaContent
+
+                obj.setMedia(QMediaContent())
+
+        if class_name == "QVideoWidget":
+            with suppress(Exception):
+                obj.hide()
+            with suppress(Exception):
+                obj.setParent(None)
+            with suppress(Exception):
+                obj.deleteLater()
 
     def check_for_updates(self):
         text, style = check_for_updates()
@@ -649,7 +752,20 @@ class MainWindow(QMainWindow):
         self.refresh_input_file_queue()
         self.check_if_ready_to_process()
 
-app = QApplication([])
-window = MainWindow()
-window.show()
-app.exec_()
+def run_app():
+    app = QApplication(sys.argv)
+    window = MainWindow()
+    app.aboutToQuit.connect(window.shutdown)
+    window.show()
+
+    exit_code = app.exec_()
+    window.shutdown()
+    with suppress(Exception):
+        sip.delete(window)
+    window = None
+    app.processEvents()
+    return exit_code
+
+
+if __name__ == "__main__":
+    sys.exit(run_app())

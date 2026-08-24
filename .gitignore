@@ -4,3 +4,5 @@ media/.DS_Store
 .DS_Store
 .DS_Store
 *.pyc
+.venv/
+__pycache__/

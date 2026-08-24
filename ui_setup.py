@@ -264,7 +264,7 @@ def setup_ui(self):
     )
     self.layout.addWidget(self.progress_bar)
 
-    self.timer = QTimer()
+    self.timer = QTimer(self)
 
     current_year = datetime.now().year
     self.copyright_label.setText(f"© {current_year} Robert Webber | GPL-3.0")

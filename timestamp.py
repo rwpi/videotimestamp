@@ -9,6 +9,13 @@ import sys
 import stat
 import signal
 
+VIOFO_FILENAME_PATTERNS = (
+    # Newer dual-channel files, for example 2026_0518_081504_F.MP4.
+    re.compile(r"^\d{4}_\d{4}_\d{6}_[FR]$", flags=re.IGNORECASE),
+    # Older/generated VIOFO files, for example 2026_0518_081538_042803F.MP4.
+    re.compile(r"^\d{4}_\d{4}_\d{6}_\d{5,6}[A-Z]?$", flags=re.IGNORECASE),
+)
+
 def get_resource_path(relative_path):
     """ Get absolute path to resource, works for dev and for PyInstaller """
     try:
@@ -226,9 +233,18 @@ class Worker(QThread):
         if "VIOFO" in identity_upper:
             return True
         stem = Path(file_path).stem
-        if re.match(r"^\d{4}_\d{4}_\d{6}_\d{5,6}[A-Z]?$", stem, flags=re.IGNORECASE):
+        if any(pattern.match(stem) for pattern in VIOFO_FILENAME_PATTERNS):
             return True
         return False
+
+    def get_viofo_output_suffix(self, file_path, camera_identity):
+        if not self.is_viofo_file(file_path, camera_identity):
+            return ""
+        stem = Path(file_path).stem
+        match = re.search(r"(?:_|\d)([FR])$", stem, flags=re.IGNORECASE)
+        if match:
+            return f"_{match.group(1).upper()}"
+        return ""
 
     def should_skip_timestamp_overlay(self, file_path, camera_identity):
         identity_upper = camera_identity.upper()
@@ -367,11 +383,11 @@ class Worker(QThread):
                     if duration is not None:
                         start_time_unix = int(round(start_time_unix - duration))
                 dt = datetime.datetime.fromtimestamp(start_time_unix)  # Convert the Unix timestamp back to a datetime
-                lawmate_suffix = ""
+                output_suffix = self.get_viofo_output_suffix(file_path, camera_identity)
                 if self.append_lawmate_covert_suffix and self.is_lawmate_file(file_path, camera_identity):
-                    lawmate_suffix = "_COVERT"
+                    output_suffix = f"{output_suffix}_COVERT"
                 output_file_name = (
-                    f"{dt.strftime(self.date_format)}_{dt.strftime('%H-%M-%S')}{lawmate_suffix}.mp4"
+                    f"{dt.strftime(self.date_format)}_{dt.strftime('%H-%M-%S')}{output_suffix}.mp4"
                 )
                 output_file = os.path.join(self.output_folder_path, output_file_name)
                 if self.should_skip_timestamp_overlay(file_path, camera_identity):

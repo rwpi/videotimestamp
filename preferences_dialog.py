@@ -18,6 +18,12 @@ from PyQt5.QtWidgets import (
 )
 from PyQt5.QtCore import Qt, QSettings
 
+from renamer_detection import (
+    confidence_percent_for_sensitivity_index,
+    migrate_detection_settings,
+    sensitivity_index_from_confidence_percent,
+)
+
 
 class PreferencesDialog(QDialog):
     DATE_FORMATS = [
@@ -228,6 +234,7 @@ class PreferencesDialog(QDialog):
         return page
 
     def load_settings(self):
+        migrate_detection_settings(self.settings)
         self.use_hwaccel_checkbox.setChecked(self.settings.value('use_hwaccel', True, type=bool))
         self.remove_audio_checkbox.setChecked(self.settings.value('remove_audio', True, type=bool))
         self.dst_fix_checkbox.setChecked(self.settings.value('manually_adjusted_for_dst', False, type=bool))
@@ -246,12 +253,9 @@ class PreferencesDialog(QDialog):
         )
         self.renamer_append_covert_checkbox.setChecked(self.settings.value('vrn/append_covert', True, type=bool))
         saved_confidence = self.settings.value('vrn/ai_confidence', 55, type=int)
-        sensitivity_index = 1
-        if saved_confidence <= 45:
-            sensitivity_index = 0
-        elif saved_confidence >= 65:
-            sensitivity_index = 2
-        self.renamer_sensitivity_combo.setCurrentIndex(sensitivity_index)
+        self.renamer_sensitivity_combo.setCurrentIndex(
+            sensitivity_index_from_confidence_percent(saved_confidence)
+        )
         tag = self.settings.value('vrn/human_tag', 'HUMAN')
         index = self.renamer_human_tag_combo.findText(str(tag).upper())
         if index >= 0:
@@ -306,14 +310,9 @@ class PreferencesDialog(QDialog):
         self.settings.setValue('vrn/ai_detection', self.renamer_ai_detection_checkbox.isChecked())
         self.settings.setValue('vrn/respect_existing_tags', self.renamer_respect_existing_tags_checkbox.isChecked())
         self.settings.setValue('vrn/append_covert', self.renamer_append_covert_checkbox.isChecked())
-        confidence_percent = 55
-        sensitivity_index = self.renamer_sensitivity_combo.currentIndex()
-        if sensitivity_index == 0:
-            confidence_percent = 45
-        elif sensitivity_index == 1:
-            confidence_percent = 55
-        elif sensitivity_index == 2:
-            confidence_percent = 65
+        confidence_percent = confidence_percent_for_sensitivity_index(
+            self.renamer_sensitivity_combo.currentIndex()
+        )
         self.settings.setValue('vrn/ai_confidence', confidence_percent)
         self.settings.setValue('vrn/human_tag', self.renamer_human_tag_combo.currentText().strip().upper())
         selected_format = self.DATE_FORMATS[self.date_format_combo.currentIndex()][1]

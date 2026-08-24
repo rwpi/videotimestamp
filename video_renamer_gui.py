@@ -10,6 +10,12 @@ import cv2
 from PyQt5 import QtCore, QtWidgets
 from PyQt5.QtCore import QSettings
 
+from renamer_detection import (
+    confidence_percent_for_sensitivity_index,
+    frame_stride_for_confidence_percent,
+    migrate_detection_settings,
+    should_sample_detection_frame,
+)
 from timestamp import get_resource_path
 
 # ----------------------------
@@ -111,6 +117,7 @@ def scan_for_human(model, video_path: Path, conf: float, frame_stride: int, shou
 
     device = pick_device()
     idx = 0
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
 
     try:
         while True:
@@ -122,7 +129,7 @@ def scan_for_human(model, video_path: Path, conf: float, frame_stride: int, shou
                 return False  # EOF, no human detected
 
             idx += 1
-            if frame_stride > 1 and (idx % frame_stride) != 0:
+            if not should_sample_detection_frame(idx, frame_stride, total_frames):
                 continue
 
             results = model.predict(
@@ -637,7 +644,9 @@ class MainWindow(QtWidgets.QWidget):
     progress_changed = QtCore.pyqtSignal(int)
     run_started = QtCore.pyqtSignal()
     run_finished = QtCore.pyqtSignal()
-    SENSITIVITY_THRESHOLDS = (65, 55, 45)  # Low, Medium, High sensitivity
+    SENSITIVITY_THRESHOLDS = tuple(
+        confidence_percent_for_sensitivity_index(index) for index in range(3)
+    )
     SENSITIVITY_LABELS = ("Low", "Medium", "High")
 
     def __init__(self, initial_folder: str | None = None):
@@ -662,7 +671,7 @@ class MainWindow(QtWidgets.QWidget):
 
         self.stride_spin = QtWidgets.QSpinBox()
         self.stride_spin.setRange(1, 10_000)
-        self.stride_spin.setValue(10)
+        self.stride_spin.setValue(frame_stride_for_confidence_percent(55))
 
         self.integrity_spin = QtWidgets.QDoubleSpinBox()
         self.integrity_spin.setRange(0.1, 36000.0)
@@ -716,6 +725,7 @@ class MainWindow(QtWidgets.QWidget):
 
     def _current_confidence_percent(self) -> int:
         settings = self._settings()
+        migrate_detection_settings(settings)
         return settings.value("vrn/ai_confidence", 55, type=int)
 
     def _choose_folder(self):
@@ -758,11 +768,12 @@ class MainWindow(QtWidgets.QWidget):
             return
 
         settings = self._settings()
+        confidence_percent = self._current_confidence_percent()
         cfg = TaggerConfig(
             folder=self.folder_path,
             model=self.model_edit.text().strip(),
-            conf=float(self._current_confidence_percent()) / 100.0,
-            frame_stride=int(self.stride_spin.value()),
+            conf=float(confidence_percent) / 100.0,
+            frame_stride=frame_stride_for_confidence_percent(confidence_percent),
             integrity_seconds=float(self.integrity_spin.value()),
             extensions=self.extensions_edit.text().strip(),
             dry_run=False,
