@@ -1,0 +1,168 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
+	<key>CFBundleDisplayName</key>
+	<string>VTS</string>
+	<key>CFBundleExecutable</key>
+	<string>VTS</string>
+	<key>CFBundleIconFile</key>
+	<string>VTS.icns</string>
+	<key>CFBundleIdentifier</key>
+	<string>net.rwebber.vts</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>VTS</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>2.0.0</string>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleTypeRole</key>
+			<string>Viewer</string>
+			<key>CFBundleURLName</key>
+			<string>net.rwebber.vts.finder-job</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>vts</string>
+			</array>
+		</dict>
+	</array>
+	<key>CFBundleVersion</key>
+	<string>200</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>13.0</string>
+	<key>LSUIElement</key>
+	<true/>
+	<key>NSDesktopFolderUsageDescription</key>
+	<string>VTS needs access to selected videos on the Desktop to process footage and save requested outputs.</string>
+	<key>NSDocumentsFolderUsageDescription</key>
+	<string>VTS needs access to selected videos in Documents to process footage and save requested outputs.</string>
+	<key>NSDownloadsFolderUsageDescription</key>
+	<string>VTS needs access to selected videos in Downloads to process footage and save requested outputs.</string>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<key>NSNetworkVolumesUsageDescription</key>
+	<string>VTS needs access to selected network storage to process video footage and save requested outputs.</string>
+	<key>NSPrincipalClass</key>
+	<string>NSApplication</string>
+	<key>NSRemovableVolumesUsageDescription</key>
+	<string>VTS needs access to selected cameras and external drives to process video footage.</string>
+	<key>NSServices</key>
+	<array>
+		<dict>
+			<key>NSMenuItem</key>
+			<dict>
+				<key>default</key>
+				<string>VTS: Timestamp Videos</string>
+			</dict>
+			<key>NSMessage</key>
+			<string>vtsTimestamp</string>
+			<key>NSPortName</key>
+			<string>VTS</string>
+			<key>NSRequiredContext</key>
+			<dict/>
+			<key>NSSendFileTypes</key>
+			<array>
+				<string>public.movie</string>
+				<string>public.folder</string>
+			</array>
+		</dict>
+		<dict>
+			<key>NSMenuItem</key>
+			<dict>
+				<key>default</key>
+				<string>VTS: Remove Audio</string>
+			</dict>
+			<key>NSMessage</key>
+			<string>vtsRemoveAudio</string>
+			<key>NSPortName</key>
+			<string>VTS</string>
+			<key>NSRequiredContext</key>
+			<dict/>
+			<key>NSSendFileTypes</key>
+			<array>
+				<string>public.movie</string>
+				<string>public.folder</string>
+			</array>
+		</dict>
+		<dict>
+			<key>NSMenuItem</key>
+			<dict>
+				<key>default</key>
+				<string>VTS: Merge Clips</string>
+			</dict>
+			<key>NSMessage</key>
+			<string>vtsMerge</string>
+			<key>NSPortName</key>
+			<string>VTS</string>
+			<key>NSRequiredContext</key>
+			<dict/>
+			<key>NSSendFileTypes</key>
+			<array>
+				<string>public.movie</string>
+				<string>public.folder</string>
+			</array>
+		</dict>
+		<dict>
+			<key>NSMenuItem</key>
+			<dict>
+				<key>default</key>
+				<string>VTS: Transcode Videos</string>
+			</dict>
+			<key>NSMessage</key>
+			<string>vtsTranscode</string>
+			<key>NSPortName</key>
+			<string>VTS</string>
+			<key>NSRequiredContext</key>
+			<dict/>
+			<key>NSSendFileTypes</key>
+			<array>
+				<string>public.movie</string>
+				<string>public.folder</string>
+			</array>
+		</dict>
+		<dict>
+			<key>NSMenuItem</key>
+			<dict>
+				<key>default</key>
+				<string>VTS: Calculate Runtime</string>
+			</dict>
+			<key>NSMessage</key>
+			<string>vtsVideoMinutes</string>
+			<key>NSPortName</key>
+			<string>VTS</string>
+			<key>NSRequiredContext</key>
+			<dict/>
+			<key>NSSendFileTypes</key>
+			<array>
+				<string>public.movie</string>
+				<string>public.folder</string>
+			</array>
+		</dict>
+		<dict>
+			<key>NSMenuItem</key>
+			<dict>
+				<key>default</key>
+				<string>VTS: Order Clips</string>
+			</dict>
+			<key>NSMessage</key>
+			<string>vtsClipOrder</string>
+			<key>NSPortName</key>
+			<string>VTS</string>
+			<key>NSRequiredContext</key>
+			<dict/>
+			<key>NSSendFileTypes</key>
+			<array>
+				<string>public.movie</string>
+				<string>public.folder</string>
+			</array>
+		</dict>
+	</array>
+</dict>
+</plist>

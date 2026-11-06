@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+        <!-- These are required for binaries built by PyInstaller -->
+        <key>com.apple.security.cs.allow-jit</key>
+        <true/>
+        <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+        <true/>
+        <key>com.apple.security.cs.disable-library-validation</key>
+        <true/>
+        <!-- This fixes console error before sandboxing -->
+        <key>com.apple.security.automation.apple-events</key>
+        <true/>
+        <!-- Sandboxing entitlements 
+        <key>com.apple.security.files.user-selected.read-write</key>
+        <true/>
+        <key>com.apple.security.app-sandbox</key>
+        <true/>
+        <key>com.apple.security.files.volumes.read-write</key>
+        <true/>
+        <key>com.apple.security.assets.movies.read-write</key>
+        <true/>
+        <key>com.apple.security.inherit</key>
+        <true/>
+        <key>com.apple.security.cs.allow-dyld-environment-variables</key>
+        <true/>    
+        <key>com.apple.security.files.bookmarks.app-scope</key>
+        <true/> -->
+        <!-- Temporary exception to allow communication with launchservicesd
+        <key>com.apple.security.temporary-exception.mach-lookup.global-name</key>
+        <array>
+            <string>com.apple.coreservices.launchservicesd</string>
+        </array>   -->
+        <!-- Other weird error
+        <key>com.apple.security.personal-information.calendars</key>
+        <true/>  -->
+        <!-- temp exception for Sandbox: PIVT(11744) deny(1) file-read-data /dev/fd
+        <key>com.apple.security.device.raw-device</key> 
+        <true/>  -->
+</dict>
+</plist>

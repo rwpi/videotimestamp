@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "https://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleDevelopmentRegion</key>
+    <string>en</string>
+    <key>CFBundleDisplayName</key>
+    <string>VTS: __TITLE__</string>
+    <key>CFBundleExecutable</key>
+    <string>VTSQuickAction</string>
+    <key>CFBundleIdentifier</key>
+    <string>net.rwebber.vts.quick-action.__SLUG__</string>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+    <key>CFBundleName</key>
+    <string>VTSQuickAction</string>
+    <key>CFBundlePackageType</key>
+    <string>XPC!</string>
+    <key>CFBundleShortVersionString</key>
+    <string>1.0</string>
+    <key>CFBundleVersion</key>
+    <string>3</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>13.0</string>
+    <key>NSPrincipalClass</key>
+    <string>NSApplication</string>
+    <key>VTSFinderAction</key>
+    <string>__ACTION__</string>
+    <key>NSExtension</key>
+    <dict>
+        <key>NSExtensionAttributes</key>
+        <dict>
+            <key>NSExtensionActivationRule</key>
+            <string>
+                extensionItems.@count &gt; 0 AND
+                extensionItems.@sum.attachments.@count &lt;= 1000 AND
+                SUBQUERY(extensionItems, $item,
+                    $item.attachments.@count &gt; 0 AND
+                    SUBQUERY($item.attachments, $attachment,
+                        ANY $attachment.registeredTypeIdentifiers UTI-CONFORMS-TO "public.file-url" OR
+                        ANY $attachment.registeredTypeIdentifiers UTI-CONFORMS-TO "public.movie" OR
+                        ANY $attachment.registeredTypeIdentifiers UTI-CONFORMS-TO "public.folder"
+                    ).@count == $item.attachments.@count
+                ).@count == extensionItems.@count
+            </string>
+            <key>NSExtensionServiceAllowsFinderPreviewItem</key>
+            <true/>
+            <key>NSExtensionServiceFinderPreviewLabel</key>
+            <string>VTS: __TITLE__</string>
+            <key>NSExtensionServiceFinderPreviewIconName</key>
+            <string>NSActionTemplate</string>
+            <key>NSExtensionServiceRoleType</key>
+            <string>NSExtensionServiceRoleTypeEditor</string>
+        </dict>
+        <key>NSExtensionPointIdentifier</key>
+        <string>com.apple.services</string>
+        <key>NSExtensionPrincipalClass</key>
+        <string>VTSQuickAction</string>
+    </dict>
+</dict>
+</plist>

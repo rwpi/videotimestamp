@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+from __future__ import annotations
+
 import datetime
 import os
 import re
@@ -7,88 +9,34 @@ import subprocess
 from collections import Counter
 from pathlib import Path
 
-from PyQt5 import QtCore, QtWidgets
+from PyQt5 import QtCore
 from PyQt5.QtCore import QSettings
 
+from date_settings import preferred_date_order_from_settings
+from file_utils import natural_sort_key, parse_clip_datetime
 from hwaccel_filter import filter_hwaccel_methods
-from timestamp import get_resource_path
-from video_renamer_gui import get_duration_seconds
+from original_archive import is_camera_card_path
+from settings_coercion import optional_positive_float
+from timestamp import get_bundled_ffmpeg_path, get_bundled_ffprobe_path
+from clip_utils import get_duration_seconds
 
 
-VIDEO_EXTENSIONS = {".mp4", ".mov", ".mkv", ".avi", ".m4v"}
+VIDEO_EXTENSIONS = {".mts", ".mp4", ".mov", ".mkv", ".avi", ".m4v"}
+DEFAULT_CLIENT_DELIVERY_QUALITY = "balanced"
+DEFAULT_CLIENT_DELIVERY_MAX_SIZE_GB = 4.5
+CLIENT_DELIVERY_QUALITY_PRESETS = {
+    "high": ("High Quality", 20, 8_000_000),
+    "balanced": ("Balanced (Recommended)", 23, 5_000_000),
+    "compact": ("Compact", 26, 3_000_000),
+}
 TAG_SUFFIX_PATTERN = re.compile(
-    r"(_(INTEGRITY|CLAIMANT|HUMAN|UNKNOWN|PERSON|SUBJECT|COVERT))+$",
+    r"(_(INTEGRITY|CLAIMANT|HUMAN|UNKNOWN|CAR|PERSON|SUBJECT|COVERT))+$",
     flags=re.IGNORECASE,
 )
 TIMESTAMP_PATTERN = re.compile(
     r"((?:\d{2}|[A-Za-z]{3})-(?:\d{2}|[A-Za-z]{3})-\d{4}_\d{2}-\d{2}-\d{2})",
     flags=re.IGNORECASE,
 )
-
-
-def preferred_date_order_from_settings() -> str | None:
-    settings = QSettings("VideoTimestamp", "VTS")
-    fmt = settings.value("date_format", "%m-%d-%Y")
-    if isinstance(fmt, str):
-        if fmt.startswith("%d"):
-            return "DMY"
-        if fmt.startswith("%m") or fmt.startswith("%b"):
-            return "MDY"
-    return None
-
-
-def parse_clip_datetime(value: str, preferred_order: str | None = None) -> datetime.datetime | None:
-    try:
-        date_part, _ = value.split("_", 1)
-        a_str, b_str, _ = date_part.split("-", 2)
-        a_is_alpha = a_str.isalpha()
-        b_is_alpha = b_str.isalpha()
-        if not a_is_alpha:
-            a = int(a_str)
-        else:
-            a = None
-        if not b_is_alpha:
-            b = int(b_str)
-        else:
-            b = None
-    except ValueError:
-        a = b = None
-        a_is_alpha = b_is_alpha = False
-
-    formats = []
-    if a_is_alpha and not b_is_alpha:
-        formats.append("%b-%d-%Y_%H-%M-%S")
-    elif b_is_alpha and not a_is_alpha:
-        formats.append("%d-%b-%Y_%H-%M-%S")
-    elif a is not None and b is not None:
-        if a > 12 and b <= 12:
-            formats.append("%d-%m-%Y_%H-%M-%S")
-        elif b > 12 and a <= 12:
-            formats.append("%m-%d-%Y_%H-%M-%S")
-        elif preferred_order == "DMY":
-            formats.append("%d-%m-%Y_%H-%M-%S")
-        elif preferred_order == "MDY":
-            formats.append("%m-%d-%Y_%H-%M-%S")
-
-    fallback_formats = [
-        "%m-%d-%Y_%H-%M-%S",
-        "%d-%m-%Y_%H-%M-%S",
-        "%b-%d-%Y_%H-%M-%S",
-        "%d-%b-%Y_%H-%M-%S",
-    ]
-    if not formats:
-        formats = fallback_formats
-    else:
-        for fmt in fallback_formats:
-            if fmt not in formats:
-                formats.append(fmt)
-
-    for fmt in formats:
-        try:
-            return datetime.datetime.strptime(value, fmt)
-        except ValueError:
-            continue
-    return None
 
 
 def extract_clip_datetime(path: Path) -> datetime.datetime | None:
@@ -100,17 +48,17 @@ def extract_clip_datetime(path: Path) -> datetime.datetime | None:
     return parse_clip_datetime(match.group(1), preferred_order=preferred_date_order_from_settings())
 
 
-def is_merge_output(path: Path) -> bool:
-    stem = path.stem.lower()
-    return stem.startswith("merged_") or stem.endswith("_merged")
+#: Legacy CLAIMANT/HUMAN tags are subject video.
+from classification_tags import SUBJECT_CLASSIFICATIONS
 
 
 def classify_merge_group(path: Path) -> str:
+    """Which reel a clip belongs in, going by its filename tag."""
     stem_upper = path.stem.upper()
-    if stem_upper.endswith("_CLAIMANT") or stem_upper.endswith("_COVERT"):
-        return "claimant"
     if stem_upper.endswith("_INTEGRITY"):
         return "integrity"
+    if any(stem_upper.endswith(f"_{tag}") for tag in SUBJECT_CLASSIFICATIONS):
+        return "subject"
     return "main"
 
 
@@ -132,62 +80,51 @@ def merge_output_name_for_clips(clips: list[Path], group_name: str = "main") -> 
         for clip_datetime in (extract_clip_datetime(clip) for clip in clips)
         if clip_datetime is not None
     ]
-    group_suffix = "" if group_name == "main" else f"_{group_name.upper()}"
     if not clip_dates:
-        return f"merged_clips{group_suffix}.mp4"
+        if group_name == "main":
+            return "merged_clips.mp4"
+        else:
+            return f"merged_{group_name}_clips.mp4"
     first_date = min(clip_dates)
-    return f"{first_date.strftime('%m-%d-%Y')}{group_suffix}_MERGED.mp4"
+    if group_name == "main":
+        return f"{first_date.strftime('%m-%d-%Y')}_MERGED.mp4"
+    else:
+        return f"{first_date.strftime('%m-%d-%Y')}_{group_name.upper()}_MERGED.mp4"
 
 
-def natural_sort_key(value: str):
-    return [int(part) if part.isdigit() else part.lower() for part in re.split(r"(\d+)", value)]
+def merge_clip_sort_key(path: Path):
+    """Sort timestamped clips chronologically, regardless of CLIP number."""
+    clip_datetime = extract_clip_datetime(path)
+    if clip_datetime is not None:
+        return (0, clip_datetime, natural_sort_key(path.name))
+    return (1, datetime.datetime.max, natural_sort_key(str(path)))
 
 
-def ffprobe_path_for(ffmpeg_path: str) -> str:
-    suffix = ".exe" if os.name == "nt" else ""
-    path = Path(ffmpeg_path)
-    if path.parent == Path("."):
-        return f"ffprobe{suffix}"
-    return str(path.with_name(f"ffprobe{suffix}"))
+# ffmpeg keeps -maxrate and -bufsize in signed 32-bit integers, and bufsize is
+# written as twice the rate, so anything above ~1.07 Gb/s makes the encoder
+# refuse to start. A short merge measured against a large size cap computes
+# gigabits per second, which is far above every delivery preset, so capping the
+# limit here costs nothing and keeps the encoder arguments representable.
+MAX_CLIENT_VIDEO_BITRATE_LIMIT = 100_000_000
 
 
-class DroppableQueueList(QtWidgets.QListWidget):
-    def __init__(self, owner):
-        super().__init__()
-        self.owner = owner
-        self.setAcceptDrops(True)
-        self.setDefaultDropAction(QtCore.Qt.DropAction.MoveAction)
-        self.setDragDropMode(QtWidgets.QAbstractItemView.DragDropMode.InternalMove)
-
-    def dragEnterEvent(self, event):
-        if event.mimeData().hasUrls() or event.source() is self:
-            event.acceptProposedAction()
-            return
-        super().dragEnterEvent(event)
-
-    def dragMoveEvent(self, event):
-        if event.mimeData().hasUrls() or event.source() is self:
-            event.acceptProposedAction()
-            return
-        super().dragMoveEvent(event)
-
-    def dropEvent(self, event):
-        paths = [url.toLocalFile() for url in event.mimeData().urls() if url.isLocalFile()]
-        if paths:
-            self.owner.add_input_files(paths)
-            event.acceptProposedAction()
-            return
-        if event.source() is self:
-            super().dropEvent(event)
-            return
-        super().dropEvent(event)
-
-    def keyPressEvent(self, event):
-        if event.key() in (QtCore.Qt.Key_Delete, QtCore.Qt.Key_Backspace):
-            self.owner.remove_selected_input_files()
-            event.accept()
-            return
-        super().keyPressEvent(event)
+def calculate_client_video_bitrate_limit(
+    duration_seconds: float,
+    max_output_bytes: int,
+    include_audio: bool,
+) -> int:
+    if duration_seconds <= 0 or max_output_bytes <= 0:
+        raise ValueError("Duration and maximum output size must be positive.")
+    total_bits_per_second = int(
+        max_output_bytes * 8 * 0.96 / duration_seconds
+    )
+    non_video_bits_per_second = 32_000 + (192_000 if include_audio else 0)
+    video_bits_per_second = total_bits_per_second - non_video_bits_per_second
+    if video_bits_per_second < 100_000:
+        raise ValueError(
+            "The client-size limit is too small for this merged video's runtime."
+        )
+    return min(video_bits_per_second, MAX_CLIENT_VIDEO_BITRATE_LIMIT)
 
 
 class MergeWorker(QtCore.QObject):
@@ -196,13 +133,32 @@ class MergeWorker(QtCore.QObject):
     finished = QtCore.pyqtSignal(list)
     failed = QtCore.pyqtSignal(str)
 
-    def __init__(self, folder: Path, groups: list[tuple[str, list[Path]]]):
+    def __init__(
+        self,
+        folder: Path,
+        groups: list[tuple[str, list[Path]]],
+        *,
+        client_delivery: bool = False,
+        client_quality: str = DEFAULT_CLIENT_DELIVERY_QUALITY,
+        client_max_output_bytes: int = round(
+            DEFAULT_CLIENT_DELIVERY_MAX_SIZE_GB * 1_000_000_000
+        ),
+    ):
         super().__init__()
         self.folder = folder
         self.groups = groups
         settings = QSettings("VideoTimestamp", "VTS")
         self.use_hwaccel = settings.value("use_hwaccel", True, type=bool)
+        self.remove_audio = settings.value("remove_audio", True, type=bool)
+        self.aspect_ratio_handling = settings.value("merge/aspect_ratio_handling", "letterbox")
         self.hwaccel_method = filter_hwaccel_methods()
+        self.client_delivery = client_delivery
+        self.client_quality = (
+            client_quality
+            if client_quality in CLIENT_DELIVERY_QUALITY_PRESETS
+            else DEFAULT_CLIENT_DELIVERY_QUALITY
+        )
+        self.client_max_output_bytes = client_max_output_bytes
         self.was_cancelled = False
         self._stop_requested = False
         self._current_process = None
@@ -233,6 +189,16 @@ class MergeWorker(QtCore.QObject):
         outputs = []
         total_groups = len(self.groups)
         try:
+            # The merged video is written into self.folder, so a folder on a
+            # card would write onto the only copy of the footage. Every runner
+            # checks first; this covers callers that do not, before anything
+            # is encoded.
+            if is_camera_card_path(self.folder):
+                raise RuntimeError(
+                    f"The output folder is on a camera card ({self.folder}). "
+                    "VTS only ever copies from a card. Import its clips first, "
+                    "then merge the imported copies."
+                )
             for index, (group_name, clips) in enumerate(self.groups, start=1):
                 if self._should_stop():
                     self.was_cancelled = True
@@ -249,7 +215,7 @@ class MergeWorker(QtCore.QObject):
             self.failed.emit(str(exc))
 
     def _get_video_frame_rate(self, file_path: Path) -> float | None:
-        ffprobe_path = ffprobe_path_for(get_resource_path("ffmpeg"))
+        ffprobe_path = get_bundled_ffprobe_path()
         try:
             result = subprocess.run(
                 [
@@ -280,7 +246,7 @@ class MergeWorker(QtCore.QObject):
         return None
 
     def _get_video_resolution(self, file_path: Path) -> tuple[int, int] | None:
-        ffprobe_path = ffprobe_path_for(get_resource_path("ffmpeg"))
+        ffprobe_path = get_bundled_ffprobe_path()
         try:
             result = subprocess.run(
                 [
@@ -313,7 +279,7 @@ class MergeWorker(QtCore.QObject):
         return None
 
     def _has_audio_stream(self, file_path: Path) -> bool:
-        ffprobe_path = ffprobe_path_for(get_resource_path("ffmpeg"))
+        ffprobe_path = get_bundled_ffprobe_path()
         try:
             result = subprocess.run(
                 [
@@ -346,16 +312,19 @@ class MergeWorker(QtCore.QObject):
     ) -> tuple[str, list[str]]:
         filters = []
         concat_inputs = []
-        include_audio = any(audio_streams)
+        include_audio = any(audio_streams) and not self.remove_audio
 
         for index, clip in enumerate(clips):
             video_chain = f"[{index}:v:0]settb=AVTB,setpts=PTS-STARTPTS"
             if target_resolution:
                 width, height = target_resolution
-                video_chain += (
-                    f",scale={width}:{height}:force_original_aspect_ratio=decrease"
-                    f",pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:black"
-                )
+                if self.aspect_ratio_handling == "stretch":
+                    video_chain += f",scale={width}:{height}"
+                else:
+                    video_chain += (
+                        f",scale={width}:{height}:force_original_aspect_ratio=decrease"
+                        f",pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:black"
+                    )
             if target_fps:
                 video_chain += f",fps={target_fps},setpts=N/({target_fps}*TB)"
             video_chain += ",setsar=1"
@@ -389,9 +358,15 @@ class MergeWorker(QtCore.QObject):
             maps.extend(["-map", "[a]"])
         return ";".join(filters), maps
 
-    def _merge_group(self, group_name: str, clips: list[Path]) -> Path:
-        ffmpeg_path = get_resource_path("ffmpeg")
-        base_name = merge_output_name_for_clips(clips, group_name)
+    def _merge_group(
+        self,
+        group_name: str,
+        clips: list[Path],
+        *,
+        output_name: str | None = None,
+    ) -> Path:
+        ffmpeg_path = get_bundled_ffmpeg_path()
+        base_name = output_name or merge_output_name_for_clips(clips, group_name)
         output_path = ensure_unique_output_path(self.folder, base_name)
         durations = [get_duration_seconds(clip) for clip in clips]
         total_duration_seconds = sum(duration for duration in durations if duration is not None)
@@ -399,9 +374,12 @@ class MergeWorker(QtCore.QObject):
         # Check user settings for manual override
         settings = QSettings("VideoTimestamp", "VTS")
         manual_resolution_str = settings.value('merge/target_resolution', None)
-        manual_fps = settings.value('merge/target_fps', None, type=float)
-        if manual_fps is not None and manual_fps <= 0:
-            manual_fps = None
+        # QSettings raises a QVariant/QMetaType conversion error when the
+        # Swift UI stores Automatic as an empty string and `type=float` is
+        # requested. Read the raw value and normalize it ourselves.
+        manual_fps = optional_positive_float(
+            settings.value('merge/target_fps', None)
+        )
         
         target_fps = manual_fps
         target_resolution = None
@@ -444,7 +422,7 @@ class MergeWorker(QtCore.QObject):
             audio_streams,
             durations,
         )
-        include_audio = any(audio_streams)
+        include_audio = any(audio_streams) and not self.remove_audio
 
         try:
             ffmpeg_cmd = [
@@ -464,7 +442,9 @@ class MergeWorker(QtCore.QObject):
                 "-progress",
                 "pipe:1",
             ])
-            ffmpeg_cmd.extend(self._video_encoder_args())
+            ffmpeg_cmd.extend(
+                self._video_encoder_args(total_duration_seconds, include_audio)
+            )
             if include_audio:
                 ffmpeg_cmd.extend(["-c:a", "aac", "-b:a", "192k"])
             else:
@@ -521,9 +501,59 @@ class MergeWorker(QtCore.QObject):
         if return_code != 0:
             ffmpeg_output = "\n".join(ffmpeg_output_lines[-20:])
             raise RuntimeError((ffmpeg_output or "ffmpeg merge failed").strip())
+        if (
+            self.client_delivery
+            and output_path.stat().st_size > self.client_max_output_bytes
+        ):
+            actual_size = output_path.stat().st_size / 1_000_000_000
+            output_path.unlink()
+            raise RuntimeError(
+                f"The merged output encoded to {actual_size:.2f} GB, above the "
+                "selected client-size limit. No oversized output was kept."
+            )
         return output_path
 
-    def _video_encoder_args(self) -> list[str]:
+    def _video_encoder_args(
+        self,
+        total_duration_seconds: float = 0.0,
+        include_audio: bool = False,
+    ) -> list[str]:
+        if self.client_delivery:
+            _label, crf, target_bitrate = CLIENT_DELIVERY_QUALITY_PRESETS[
+                self.client_quality
+            ]
+            max_bitrate = calculate_client_video_bitrate_limit(
+                total_duration_seconds,
+                self.client_max_output_bytes,
+                include_audio,
+            )
+            target_bitrate = min(target_bitrate, max_bitrate)
+            encoder = self.hwaccel_method if self.use_hwaccel else "libx264"
+            encoder = encoder or "libx264"
+            if encoder == "libx264":
+                return [
+                    "-c:v",
+                    "libx264",
+                    "-preset",
+                    "fast",
+                    "-crf",
+                    str(crf),
+                    "-maxrate",
+                    str(max_bitrate),
+                    "-bufsize",
+                    str(max_bitrate * 2),
+                ]
+            return [
+                "-c:v",
+                encoder,
+                "-b:v",
+                str(target_bitrate),
+                "-maxrate",
+                str(max_bitrate),
+                "-bufsize",
+                str(max_bitrate * 2),
+            ]
+
         if not self.use_hwaccel:
             return ["-c:v", "libx264", "-preset", "fast", "-crf", "18"]
 
@@ -533,236 +563,3 @@ class MergeWorker(QtCore.QObject):
 
         # Hardware encoders don't reliably accept libx264's preset/crf flags.
         return ["-c:v", encoder, "-b:v", "12M"]
-
-
-class MainWindow(QtWidgets.QWidget):
-    status_changed = QtCore.pyqtSignal(str)
-    progress_changed = QtCore.pyqtSignal(int)
-    run_started = QtCore.pyqtSignal()
-    run_finished = QtCore.pyqtSignal()
-
-    def __init__(self, initial_folder: str | None = None):
-        super().__init__()
-        self.setWindowTitle("Merge Clips")
-        self.folder_path: Path | None = None
-        self._thread = None
-        self._worker = None
-        self._clips: set[Path] = set()
-
-        self.clip_list = DroppableQueueList(self)
-        self.clip_list.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
-        self.clip_list.setStyleSheet("QListWidget { border: 1px dashed #4a4a4a; }")
-        self.clip_list.setToolTip("Drag and drop video files to add • Drag items to reorder")
-        self.file_queue_title = QtWidgets.QLabel("File Queue")
-        self.file_queue_title.setStyleSheet("font-size: 13px; font-weight: 600;")
-        self.input_files_label = QtWidgets.QLabel("0 Input Files Selected")
-        self.input_files_label.setStyleSheet("color: grey; font-size: 10px;")
-        self.add_input_files_label = QtWidgets.QLabel('<a href="#">Add</a>')
-        self.add_input_files_label.setStyleSheet("color: blue; font-size: 10px;")
-        self.add_input_files_label.linkActivated.connect(self.choose_input_files)
-        self.remove_input_files_label = QtWidgets.QLabel('<a href="#">Remove</a>')
-        self.remove_input_files_label.setStyleSheet("color: blue; font-size: 10px;")
-        self.remove_input_files_label.linkActivated.connect(self.remove_selected_input_files)
-        self.reset_input_files_label = QtWidgets.QLabel('<a href="#">Reset</a>')
-        self.reset_input_files_label.setStyleSheet("color: blue; font-size: 10px;")
-        self.reset_input_files_label.linkActivated.connect(self.reset_input_files)
-        self.output_folder_title = QtWidgets.QLabel("Output Folder")
-        self.output_folder_title.setStyleSheet("font-size: 13px; font-weight: 600;")
-        self.output_folder_label = QtWidgets.QLabel("Output Folder:")
-        self.output_folder_label.setStyleSheet("color: grey; font-size: 10px;")
-        self.output_folder_label.setTextInteractionFlags(QtCore.Qt.TextBrowserInteraction)
-        self.output_folder_label.linkActivated.connect(self.open_folder)
-        self.change_output_folder_label = QtWidgets.QLabel('<a href="#">Set</a>')
-        self.change_output_folder_label.setStyleSheet("color: blue; font-size: 10px;")
-        self.change_output_folder_label.linkActivated.connect(self.choose_output_folder)
-        self.run_btn = QtWidgets.QPushButton("Merge Clips")
-
-        input_files_row = QtWidgets.QHBoxLayout()
-        input_files_row.addWidget(self.input_files_label)
-        input_files_row.addStretch(1)
-        input_files_row.addWidget(self.add_input_files_label)
-        input_files_row.addWidget(self.remove_input_files_label)
-        input_files_row.addWidget(self.reset_input_files_label)
-
-        output_folder_row = QtWidgets.QHBoxLayout()
-        output_folder_row.addWidget(self.output_folder_label)
-        output_folder_row.addStretch(1)
-        output_folder_row.addWidget(self.change_output_folder_label)
-
-        layout = QtWidgets.QVBoxLayout(self)
-        layout.addWidget(self.file_queue_title)
-        layout.addLayout(input_files_row)
-        layout.addWidget(self.clip_list, 1)
-        layout.addWidget(self.output_folder_title)
-        layout.addLayout(output_folder_row)
-        layout.addWidget(self.run_btn)
-
-        self.run_btn.clicked.connect(self._handle_run_button)
-
-        if initial_folder:
-            self._set_folder_path(initial_folder)
-
-    def _set_folder_path(self, path: str):
-        cleaned = path.strip().strip('"').strip("'")
-        if not cleaned:
-            self.folder_path = None
-            self.output_folder_label.setText("Output Folder:")
-            self.change_output_folder_label.setText('<a href="#">Set</a>')
-            return
-        resolved = Path(cleaned).expanduser().resolve()
-        self.folder_path = resolved
-        self.output_folder_label.setText(f'Output Folder: <a href="#">{resolved.name}</a>')
-        self.change_output_folder_label.setText('<a href="#">Change</a>')
-
-    def choose_output_folder(self):
-        path = QtWidgets.QFileDialog.getExistingDirectory(self, "Select Output Folder", str(self.folder_path) if self.folder_path else "")
-        if path:
-            self._set_folder_path(path)
-
-    def open_folder(self):
-        if self.folder_path:
-            QtGui = QtWidgets.QApplication
-            from PyQt5.QtGui import QDesktopServices
-            from PyQt5.QtCore import QUrl
-            QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.folder_path)))
-
-    def choose_input_files(self):
-        file_filter = "Video Files (*.MTS *.mts *.MP4 *.mp4 *.MOV *.mov *.MKV *.mkv *.AVI *.avi *.M4V *.m4v)"
-        paths, _ = QtWidgets.QFileDialog.getOpenFileNames(self, "Select video files", "", file_filter)
-        if paths:
-            self.add_input_files(paths)
-
-    def add_input_files(self, paths):
-        valid_files = set()
-        for path in paths:
-            if not path:
-                continue
-            resolved = Path(path).expanduser()
-            if not resolved.is_file():
-                continue
-            if resolved.suffix.lower() not in VIDEO_EXTENSIONS:
-                continue
-            if is_merge_output(resolved):
-                continue
-            valid_files.add(resolved.resolve())
-
-        if not valid_files:
-            return
-
-        self._clips.update(valid_files)
-        self._refresh_queue_display()
-
-    def reset_input_files(self):
-        self._clips = set()
-        self._refresh_queue_display()
-
-    def remove_selected_input_files(self):
-        selected_files = {
-            item.data(QtCore.Qt.UserRole)
-            for item in self.clip_list.selectedItems()
-            if item.data(QtCore.Qt.UserRole)
-        }
-        if not selected_files:
-            return
-        self._clips.difference_update(Path(path) for path in selected_files)
-        self._refresh_queue_display()
-
-    def _refresh_queue_display(self, should_sort: bool = True):
-        self.clip_list.clear()
-        clips_to_display = sorted(self._clips, key=lambda item: natural_sort_key(item.name)) if should_sort else list(self._clips)
-        for path in clips_to_display:
-            self.clip_list.addItem(path.name)
-            item = self.clip_list.item(self.clip_list.count() - 1)
-            item.setData(QtCore.Qt.UserRole, str(path))
-        self.input_files_label.setText(f"{len(self._clips)} Input Files Selected")
-
-    def _get_clips_in_queue_order(self) -> list[Path]:
-        """Get clips in the order they appear in the UI queue (respects manual reordering)."""
-        clips = []
-        for i in range(self.clip_list.count()):
-            item = self.clip_list.item(i)
-            path_str = item.data(QtCore.Qt.UserRole)
-            if path_str:
-                clips.append(Path(path_str))
-        return clips
-
-    def refresh_clips(self):
-        # No auto-population. Merge queue is managed manually.
-        self._refresh_queue_display()
-
-    def _set_running(self, running: bool):
-        self.run_btn.setText("Cancel" if running else "Merge Clips")
-        self.run_btn.setEnabled(True)
-
-    def _handle_run_button(self):
-        if self._worker is not None:
-            self._cancel_merge()
-        else:
-            self._start_merge()
-
-    def _cancel_merge(self):
-        if self._worker is None:
-            return
-        self.status_changed.emit("Cancelling Merge Clips")
-        self.run_btn.setText("Cancelling...")
-        self.run_btn.setEnabled(False)
-        self._worker.stop()
-
-    def _start_merge(self):
-        if not self.folder_path or not self.folder_path.is_dir():
-            QtWidgets.QMessageBox.warning(self, "Missing Folder", "Please select a folder.")
-            return
-        if not self._clips:
-            QtWidgets.QMessageBox.warning(self, "No Clips", "Please add clips to the merge queue.")
-            return
-
-        clips_in_order = self._get_clips_in_queue_order()
-        grouped_clips: dict[str, list[Path]] = {"claimant": [], "integrity": [], "main": []}
-        for clip in clips_in_order:
-            grouped_clips[classify_merge_group(clip)].append(clip)
-        groups = [
-            (group_name, grouped_clips[group_name])
-            for group_name in ("claimant", "integrity", "main")
-            if grouped_clips[group_name]
-        ]
-
-        self._set_running(True)
-        self.status_changed.emit("Starting merge")
-        self.progress_changed.emit(0)
-        self.run_started.emit()
-
-        self._thread = QtCore.QThread()
-        self._worker = MergeWorker(self.folder_path, groups)
-        self._worker.moveToThread(self._thread)
-        self._thread.started.connect(self._worker.run)
-        self._worker.status.connect(self.status_changed.emit)
-        self._worker.progress.connect(self.progress_changed.emit)
-        self._worker.failed.connect(self._show_error)
-        self._worker.failed.connect(self._thread.quit)
-        self._worker.finished.connect(self._on_merge_finished)
-        self._worker.finished.connect(self._thread.quit)
-        self._worker.finished.connect(self._worker.deleteLater)
-        self._worker.failed.connect(self._worker.deleteLater)
-        self._thread.finished.connect(self._thread.deleteLater)
-        self._thread.finished.connect(self.run_finished.emit)
-        self._thread.finished.connect(lambda: self._set_running(False))
-        self._thread.finished.connect(self._clear_worker_refs)
-        self._thread.start()
-
-    def _show_error(self, message: str):
-        QtWidgets.QMessageBox.critical(self, "Merge Error", message)
-        self.status_changed.emit(f"Merge failed: {message}")
-
-    def _on_merge_finished(self, outputs: list[str]):
-        was_cancelled = bool(self._worker and self._worker.was_cancelled)
-        if was_cancelled:
-            self.status_changed.emit("Merge Clips Cancelled")
-        elif outputs:
-            names = ", ".join(Path(path).name for path in outputs)
-            self.status_changed.emit(f"Created {names}")
-        if not was_cancelled:
-            self.progress_changed.emit(100)
-
-    def _clear_worker_refs(self):
-        self._worker = None
-        self._thread = None

@@ -1,8 +1,24 @@
-.gitattributes
+# macOS
 .DS_Store
-media/.DS_Store
-.DS_Store
-.DS_Store
-*.pyc
-.venv/
+
+# Python
 __pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.venv/
+
+# Build output
+/build/
+/dist/
+*.pkg
+
+# Local signing credentials
+notary-credentials.env
+
+# Media
+*.MP4
+*.mp4
+*.MTS
+*.MOV
+*.mov

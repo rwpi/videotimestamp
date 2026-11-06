@@ -1,4 +1,6 @@
-PyQt5>=5.15,<6
-requests>=2.31,<3
-urllib3<2
-opencv-python>=4.9,<5
+# Runtime dependencies
+PyQt5
+opencv-python
+
+# Build/package dependency
+pyinstaller
