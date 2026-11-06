@@ -2,7 +2,7 @@
 
 # **[*Download VTS 2.0 for macOS*](https://github.com/rwpi/videotimestamp/releases/latest)**
 
-# **[*Download Classic Version for Intel Macs and Windows*](https://github.com/rwpi/videotimestamp/releases/tag/VTS-1.1.2)**
+# **[*Download Classic Version for Windows*](https://github.com/rwpi/videotimestamp/releases/tag/VTS-1.1.2)**
 
 VTS prepares camcorder and covert-camera footage for investigators. It adds a visible
 date and time to your video using the recording time stored in each file, then
@@ -35,14 +35,14 @@ an issue with the make, model and a short sample clip.
 
 ## Install
 
-**Requires a Mac with Apple silicon running macOS 27 or later.**
+**Requires macOS 15 (Sequoia) or later.** One installer serves both Apple silicon and Intel Macs.
 
 1. Download `VTS_macOS_ARM.pkg` from the [latest release](https://github.com/rwpi/videotimestamp/releases/latest).
 2. Open it and follow the installer. An earlier VTS is replaced, and your settings carry over.
 3. Open VTS from Applications. To add its tools to Finder's right-click menu, open
    Settings and choose Finder Integration.
 
-On an Intel Mac, an Apple silicon Mac below macOS 27, or Windows? Use the
+On an older Mac, or Windows? Use the
 [classic version](https://github.com/rwpi/videotimestamp/releases/tag/VTS-1.1.2).
 
 ## Build from source

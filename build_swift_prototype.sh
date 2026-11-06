@@ -47,14 +47,10 @@ fi
 
 # Release builds carry their own interpreter and the current engine modules.
 EMBED_ENGINE="${VTS_PROTOTYPE_EMBED_ENGINE:-$RELEASE}"
-# The floor follows the bundled libraries, not the product. Homebrew builds
-# against the running system, so on macOS 27 the vendored ffmpeg stack
-# (libcrypto, libssl, liblzma) carries
-# minos 27.0; advertising anything lower makes validate_macos_runtime.py
-# reject the bundle rather than ship an app that cannot load its own
-# dependencies. Lowering this again means rebuilding those libraries against
-# the older SDK first.
-MINIMUM_MACOS="${VTS_PROTOTYPE_MINIMUM_MACOS:-27.0}"
+# The floor is the menu bar API the app itself needs. Everything the bundle
+# carries must support it on both architectures; validate_macos_runtime.py
+# checks every slice of every Mach-O against this number.
+MINIMUM_MACOS="${VTS_PROTOTYPE_MINIMUM_MACOS:-15.0}"
 
 APP_SIGN_ID="${APP_SIGN_ID:-Developer ID Application: robert webber (F4VUAN3GZ2)}"
 TEAM_ID="${TEAM_ID:-F4VUAN3GZ2}"
@@ -96,28 +92,31 @@ else
 fi
 
 # The menu bar agent suppresses its window at launch, which is a macOS 15 API.
-# This is the floor the compiled binary needs; the bundle advertises its own,
-# higher minimum for the media stack it carries.
+# This is the floor the compiled binary needs. The release ships both Apple
+# silicon and Intel code in one bundle, so every native piece is compiled once
+# per architecture and joined with lipo.
 SWIFT_DEPLOYMENT_TARGET="${VTS_PROTOTYPE_SWIFT_TARGET:-15.0}"
-case "$(uname -m)" in
-    arm64) TARGET="arm64-apple-macosx$SWIFT_DEPLOYMENT_TARGET" ;;
-    x86_64) TARGET="x86_64-apple-macosx$SWIFT_DEPLOYMENT_TARGET" ;;
-    *) echo "Unsupported macOS architecture: $(uname -m)" >&2; exit 1 ;;
-esac
+ARCHITECTURES="${VTS_ARCHITECTURES:-arm64 x86_64}"
 
 compile_native_app() {
-    CLANG_MODULE_CACHE_PATH="$MODULE_CACHE_PATH" /usr/bin/xcrun swiftc \
-        "$OPTIMIZATION_LEVEL" \
-        -parse-as-library \
-        -module-name VTS \
-        -sdk "$SDK_PATH" \
-        -target "$TARGET" \
-        "$SOURCE_DIR/VTSNativePrototype.swift" \
-        -o "$1" \
-        -framework AppKit \
-        -framework AVFoundation \
-        -framework AVKit \
-        -framework SwiftUI
+    local output="$1" slices=()
+    for arch in $ARCHITECTURES; do
+        CLANG_MODULE_CACHE_PATH="$MODULE_CACHE_PATH/$arch" /usr/bin/xcrun swiftc \
+            "$OPTIMIZATION_LEVEL" \
+            -parse-as-library \
+            -module-name VTS \
+            -sdk "$SDK_PATH" \
+            -target "$arch-apple-macosx$SWIFT_DEPLOYMENT_TARGET" \
+            "$SOURCE_DIR/VTSNativePrototype.swift" \
+            -o "$output.$arch" \
+            -framework AppKit \
+            -framework AVFoundation \
+            -framework AVKit \
+            -framework SwiftUI
+        slices+=("$output.$arch")
+    done
+    /usr/bin/lipo -create "${slices[@]}" -output "$output"
+    /bin/rm -f "${slices[@]}"
 }
 
 swift_source_digests() {
@@ -179,12 +178,23 @@ info_path.write_bytes(plistlib.dumps(info))
 PY_STAMP
 /bin/cp "$ROOT_DIR/VTS.icns" "$CONTENTS_PATH/Resources/VTS.icns"
 
-# The PyQt application that used to donate a prebuilt media stack is gone, so
-# the ffmpeg on PATH is the only automatic source; it is vendored below.
-# VTS_PROTOTYPE_MEDIA_APP still aims the build at a bundle that carries one.
+# Release builds carry static ffmpeg and ffprobe for both architectures from
+# VTS_MEDIA_TOOLS_DIR (see docs/building.md). Without it, the ffmpeg on PATH
+# is vendored with its libraries, which only serves this Mac's architecture.
+MEDIA_TOOLS_DIR="${VTS_MEDIA_TOOLS_DIR:-}"
 MEDIA_APP="${VTS_PROTOTYPE_MEDIA_APP:-}"
 
-if [[ -n "$MEDIA_APP" ]]; then
+if [[ -n "$MEDIA_TOOLS_DIR" ]]; then
+    for TOOL in ffmpeg ffprobe; do
+        /bin/cp -p "$MEDIA_TOOLS_DIR/$TOOL" "$ENGINE_TOOLS_PATH/$TOOL"
+        /bin/chmod u+w "$ENGINE_TOOLS_PATH/$TOOL"
+        # Dependency lines are indented; a fat file also prints one header per slice.
+        if /usr/bin/otool -L "$ENGINE_TOOLS_PATH/$TOOL" | /usr/bin/grep -E '^[[:space:]]' | /usr/bin/awk '{print $1}' | /usr/bin/grep -qvE '^(/usr/lib/|/System/)'; then
+            echo "$MEDIA_TOOLS_DIR/$TOOL is not statically linked." >&2
+            exit 1
+        fi
+    done
+elif [[ -n "$MEDIA_APP" ]]; then
     MEDIA_FRAMEWORKS="$MEDIA_APP/Contents/Frameworks"
     /bin/cp -Lp "$MEDIA_FRAMEWORKS/ffmpeg" "$ENGINE_TOOLS_PATH/ffmpeg"
     /bin/cp -Lp "$MEDIA_FRAMEWORKS/ffprobe" "$ENGINE_TOOLS_PATH/ffprobe"

@@ -26,11 +26,11 @@ else
     SDK_PATH="$(/usr/bin/xcrun --sdk macosx --show-sdk-path)"
 fi
 
-case "$(uname -m)" in
-    arm64) TARGET="arm64-apple-macosx12.0" ;;
-    x86_64) TARGET="x86_64-apple-macosx12.0" ;;
-    *) echo "Unsupported macOS architecture: $(uname -m)" >&2; exit 1 ;;
-esac
+ARCH_FLAGS=()
+for arch in ${VTS_ARCHITECTURES:-arm64 x86_64}; do
+    ARCH_FLAGS+=(-arch "$arch")
+done
+MINIMUM_FLAG="-mmacosx-version-min=12.0"
 
 /bin/rm -rf "$EXTENSION_PATH"
 /bin/mkdir -p "$MACOS_PATH" "$RESOURCES_PATH" "$MODULE_CACHE_PATH"
@@ -43,7 +43,7 @@ CLANG_MODULE_CACHE_PATH="$MODULE_CACHE_PATH" /usr/bin/xcrun clang \
     -fapplication-extension \
     -fmodules \
     -isysroot "$SDK_PATH" \
-    -target "$TARGET" \
+    "${ARCH_FLAGS[@]}" "$MINIMUM_FLAG" \
     "$SOURCE_PATH" \
     -o "$MACOS_PATH/VTSFinderExtension" \
     -framework AppKit \

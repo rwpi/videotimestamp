@@ -1,6 +1,5 @@
-# Runtime dependencies
+# Runtime dependency
 PyQt5
-opencv-python
 
 # Build/package dependency
 pyinstaller

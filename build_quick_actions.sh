@@ -20,11 +20,11 @@ else
     SDK_PATH="$(/usr/bin/xcrun --sdk macosx --show-sdk-path)"
 fi
 
-case "$(uname -m)" in
-    arm64) TARGET="arm64-apple-macosx13.0" ;;
-    x86_64) TARGET="x86_64-apple-macosx13.0" ;;
-    *) echo "Unsupported macOS architecture: $(uname -m)" >&2; exit 1 ;;
-esac
+ARCH_FLAGS=()
+for arch in ${VTS_ARCHITECTURES:-arm64 x86_64}; do
+    ARCH_FLAGS+=(-arch "$arch")
+done
+MINIMUM_FLAG="-mmacosx-version-min=13.0"
 
 /bin/mkdir -p "$OUTPUT_PARENT" "$MODULE_CACHE_PATH"
 BUILD_DIR="$(/usr/bin/mktemp -d "${TMPDIR:-/tmp}/vts-quick-actions.XXXXXX")"
@@ -38,7 +38,7 @@ CLANG_MODULE_CACHE_PATH="$MODULE_CACHE_PATH" /usr/bin/xcrun clang \
     -fapplication-extension \
     -fmodules \
     -isysroot "$SDK_PATH" \
-    -target "$TARGET" \
+    "${ARCH_FLAGS[@]}" "$MINIMUM_FLAG" \
     "$SOURCE_DIR/QuickAction.m" \
     -o "$BUILD_DIR/VTSQuickAction" \
     -framework AppKit \

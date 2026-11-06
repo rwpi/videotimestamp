@@ -7,12 +7,12 @@ import subprocess
 import sys
 from pathlib import Path
 
-import cv2
 from PyQt5.QtCore import QSettings
 
 from classification_tags import extract_trailing_tags
 from date_settings import preferred_date_order_from_settings
 from file_utils import natural_sort_key, parse_clip_datetime
+from media_tool_paths import get_bundled_ffprobe_path
 from timestamp import get_bundled_exiftool_path
 
 
@@ -37,18 +37,24 @@ def safe_rename(src: Path, dst: Path, dry_run: bool, log) -> Path:
 
 
 def get_duration_seconds(video_path: Path) -> float | None:
-    cap = cv2.VideoCapture(str(video_path))
-    if not cap.isOpened():
-        return None
+    """The clip's duration as ffprobe reports it, or None when it cannot be read."""
     try:
-        fps = cap.get(cv2.CAP_PROP_FPS) or 0.0
-        frames = cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0.0
-        if fps > 0 and frames > 0:
-            return float(frames / fps)
+        result = subprocess.run(
+            [
+                get_bundled_ffprobe_path(),
+                "-v", "error",
+                "-show_entries", "format=duration",
+                "-of", "default=noprint_wrappers=1:nokey=1",
+                str(video_path),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        duration = float(result.stdout.strip())
+    except (OSError, subprocess.TimeoutExpired, ValueError):
         return None
-    finally:
-        cap.release()
-
+    return duration if duration > 0 else None
 
 def is_vts_processed_stem(stem: str) -> bool:
     stem = re.sub(r"^CLIP\d+_", "", stem, flags=re.IGNORECASE)

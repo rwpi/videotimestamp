@@ -48,7 +48,7 @@ trap '/bin/rm -rf "$WORK"' EXIT
 <?xml version="1.0" encoding="utf-8"?>
 <installer-gui-script minSpecVersion="2">
     <title>VTS $VERSION</title>
-    <options customize="never" require-scripts="false" hostArchitectures="arm64"/>
+    <options customize="never" require-scripts="false" hostArchitectures="x86_64,arm64"/>
     <volume-check>
         <allowed-os-versions>
             <os-version min="$MINIMUM_MACOS"/>
